@@ -11,8 +11,21 @@ const ConfigSchema = z.object({
   consoleBase: z.string().default("https://www.codebuddy.cn"),
   dbPath: z.string().min(1).default("data/codebuffy.db"),
   upstreamTimeoutMs: z.coerce.number().int().min(1000).max(120_000).default(30_000),
+  downstreamApiKeys: z
+    .preprocess(
+      (val) => {
+        if (Array.isArray(val)) return val;
+        if (typeof val === "string")
+          return val
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean);
+        return [];
+      },
+      z.array(z.string().min(8)),
+    )
+    .default([]),
 });
-
 export type Config = z.infer<typeof ConfigSchema>;
 export type LogLevel = (typeof LOG_LEVELS)[number];
 
@@ -25,6 +38,7 @@ const ENV_MAP: Record<keyof Config, string> = {
   consoleBase: "CODEBUFFY_CONSOLE_BASE",
   dbPath: "CODEBUFFY_DB_PATH",
   upstreamTimeoutMs: "CODEBUFFY_UPSTREAM_TIMEOUT_MS",
+  downstreamApiKeys: "CODEBUFFY_API_KEYS",
 };
 
 export type ConfigEnv = Record<string, string | undefined>;

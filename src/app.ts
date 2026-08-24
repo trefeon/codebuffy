@@ -1,6 +1,10 @@
 import { Hono } from "hono";
 import type { Config } from "./config";
 import type { Logger } from "./logger";
+import type { Pool } from "./pool/types";
+import type { UpstreamClient } from "./upstream/client";
+import { downstreamAuth } from "./middleware/downstream-auth";
+import { mountOpenAIRoutes } from "./routes/openai";
 
 const VERSION = "0.1.0";
 
@@ -8,6 +12,8 @@ export interface AppDeps {
   config: Config;
   logger: Logger;
   startedAt: number;
+  pool?: Pool;
+  upstream?: UpstreamClient;
 }
 
 /**
@@ -18,7 +24,7 @@ export function createApp(deps: AppDeps): Hono {
   const app = new Hono();
 
   app.onError((err, c) => {
-    deps.logger.error({ err: err.stack ?? err.message }, "unhandled error");
+    deps.logger.error({ err: err.stack ?? (err as Error).message }, "unhandled error");
     // Full error details stay in the log; clients get a generic envelope.
     return c.json({ error: { code: "INTERNAL", message: "internal server error" } }, 500);
   });
@@ -38,11 +44,23 @@ export function createApp(deps: AppDeps): Hono {
       status: "ok",
       checks: {
         config: true, // config is validated at startup; process would not be serving otherwise
-        // FUTURE(M1): credentials store reachable
-        // FUTURE(M5): pool has active credentials
+        pool: deps.pool ? deps.pool.size() > 0 : false,
+        upstream: Boolean(deps.upstream),
       },
     }),
   );
+
+  // OpenAI-compatible API — only mounted when pool+upstream are provided.
+  // Health probes stay open; /v1/* is gated by downstream API keys (if configured).
+  if (deps.pool && deps.upstream) {
+    app.use("/v1/*", downstreamAuth(deps.config));
+    mountOpenAIRoutes(app, {
+      config: deps.config,
+      logger: deps.logger,
+      pool: deps.pool,
+      upstream: deps.upstream,
+    });
+  }
 
   return app;
 }
