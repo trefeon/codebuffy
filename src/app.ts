@@ -5,6 +5,7 @@ import type { Pool } from "./pool/types";
 import type { UpstreamClient } from "./upstream/client";
 import { downstreamAuth } from "./middleware/downstream-auth";
 import { mountOpenAIRoutes } from "./routes/openai";
+import { mountAnthropicRoutes } from "./routes/anthropic";
 
 const VERSION = "0.1.0";
 
@@ -49,12 +50,17 @@ export function createApp(deps: AppDeps): Hono {
       },
     }),
   );
-
   // OpenAI-compatible API — only mounted when pool+upstream are provided.
   // Health probes stay open; /v1/* is gated by downstream API keys (if configured).
   if (deps.pool && deps.upstream) {
     app.use("/v1/*", downstreamAuth(deps.config));
     mountOpenAIRoutes(app, {
+      config: deps.config,
+      logger: deps.logger,
+      pool: deps.pool,
+      upstream: deps.upstream,
+    });
+    mountAnthropicRoutes(app, {
       config: deps.config,
       logger: deps.logger,
       pool: deps.pool,

@@ -108,8 +108,13 @@ export function mountOpenAIRoutes(app: Hono, deps: OpenAIDeps): void {
 
     const upstreamReq = toUpstreamRequest(ir);
 
+    const signal: AbortSignal | undefined =
+      (c.req as unknown as { raw?: Request }).raw?.signal ??
+      (c.req as unknown as { signal?: AbortSignal }).signal ??
+      undefined;
+
     try {
-      const chunks = upstream.streamChat(upstreamReq, cred);
+      const chunks = upstream.streamChat(upstreamReq, cred, signal);
 
       if (isStream) {
         // Hono streaming SSE
