@@ -6,6 +6,7 @@ import type { UpstreamClient } from "./upstream/client";
 import { downstreamAuth } from "./middleware/downstream-auth";
 import { mountOpenAIRoutes } from "./routes/openai";
 import { mountAnthropicRoutes } from "./routes/anthropic";
+import { mountResponsesRoutes } from "./routes/responses";
 
 const VERSION = "0.1.0";
 
@@ -61,6 +62,12 @@ export function createApp(deps: AppDeps): Hono {
       upstream: deps.upstream,
     });
     mountAnthropicRoutes(app, {
+      config: deps.config,
+      logger: deps.logger,
+      pool: deps.pool,
+      upstream: deps.upstream,
+    });
+    mountResponsesRoutes(app, {
       config: deps.config,
       logger: deps.logger,
       pool: deps.pool,

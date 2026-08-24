@@ -1,0 +1,188 @@
+import type { Hono } from "hono";
+import type { UpstreamChunk } from "../upstream/types";
+import { streamSSE } from "hono/streaming";
+import type { Config } from "../config";
+import type { Logger } from "../logger";
+import type { Pool } from "../pool/types";
+import type { UpstreamClient } from "../upstream/client";
+import { UpstreamError } from "../upstream/errors";
+import { parseResponsesRequest } from "../adapters/responses/parser";
+import { ParseError } from "../ir/types";
+import { projectIRRequest } from "../adapters/responses/projection";
+import type { ProjectionMode } from "../adapters/responses/projection";
+import { aggregateStream } from "../adapters/openai-chat/aggregator";
+import { toUpstreamRequest } from "../ir/types";
+import {
+  buildResponsesResponse,
+  formatResponsesSSE,
+  responsesSSEFromUpstream,
+} from "../adapters/responses/emitter";
+import { randomBytes } from "node:crypto";
+
+function generateId(prefix = "resp"): string {
+  const sep = prefix.endsWith("_") || prefix.endsWith("-") ? "" : "_";
+  return `${prefix}${sep}${randomBytes(12).toString("hex")}`;
+}
+
+function mapUpstreamErrorToHttp(err: UpstreamError): { status: number; body: unknown } {
+  const code = err.code;
+  if (code === 11101 || code === 11128) {
+    return { status: 400, body: { error: { message: err.message, type: "invalid_request_error", code: String(code) } } };
+  }
+  if (code === 11140) {
+    return { status: 403, body: { error: { message: err.message, type: "permission_error", code: String(code) } } };
+  }
+  if (code === 14018) {
+    return { status: 429, body: { error: { message: err.message, type: "rate_limit_error", code: String(code) } } };
+  }
+  if (code === 401 || code === 403) {
+    return {
+      status: Number(code),
+      body: { error: { message: err.message, type: code === 401 ? "authentication_error" : "permission_error", code: String(code) } },
+    };
+  }
+  if (code === 429) {
+    return { status: 429, body: { error: { message: err.message, type: "rate_limit_error", code: "rate_limit_exceeded" } } };
+  }
+  if (typeof code === "number" && code >= 500) {
+    return { status: code, body: { error: { message: err.message, type: "api_error", code: String(code) } } };
+  }
+  if (err.httpStatus >= 400 && err.httpStatus < 600) {
+    return { status: err.httpStatus, body: { error: { message: err.message, type: "api_error", code: String(code) } } };
+  }
+  return { status: 502, body: { error: { message: err.message, type: "api_error", code: String(code) } } };
+}
+
+export interface ResponsesDeps {
+  config: Config;
+  logger: Logger;
+  pool: Pool;
+  upstream: UpstreamClient;
+}
+
+export function mountResponsesRoutes(app: Hono, deps: ResponsesDeps): void {
+  const { pool, upstream, logger } = deps;
+
+  app.post("/v1/responses", async (c) => {
+    let raw: unknown;
+    try {
+      raw = await c.req.json();
+    } catch {
+      return c.json({ error: { message: "Invalid JSON body", type: "invalid_request_error" } }, 400);
+    }
+
+    let ir;
+    try {
+      ir = parseResponsesRequest(raw);
+    } catch (e) {
+      if (e instanceof ParseError) {
+        return c.json({ error: { message: e.message, type: "invalid_request_error" } }, 400);
+      }
+      throw e;
+    }
+
+    // projection handling
+    const bodyRec = raw as Record<string, unknown>;
+    const queryDry = c.req.query("dry_run") ?? c.req.query("dryRun");
+    const isDryRun = queryDry === "true" || bodyRec.dry_run === true || bodyRec.dryRun === true;
+    let projectionMode: ProjectionMode | undefined;
+    const projRaw = (bodyRec.projection as string | undefined) ?? (bodyRec.mode as string | undefined);
+    if (projRaw === "conservative" || projRaw === "aggressive" || projRaw === "off") {
+      projectionMode = projRaw as ProjectionMode;
+    } else if (projRaw !== undefined) {
+      return c.json({ error: { message: `projection: must be conservative, aggressive, or off (got ${projRaw})`, type: "invalid_request_error" } }, 400);
+    }
+    let projected = ir;
+    let dryDiff: unknown = undefined;
+    if (isDryRun || projectionMode !== undefined) {
+      const mode: ProjectionMode = projectionMode ?? (isDryRun ? "conservative" : "conservative");
+      // detect agentic auto? projectIRRequest handles auto via mode conservative with internal agentic detection
+      // For explicit mode, pass directly. For dryRun without explicit, use conservative which will auto-upgrade to aggressive if needed.
+      const result = projectIRRequest(ir, { mode, dryRun: true });
+      projected = result.ir;
+      dryDiff = result.dryRunDiff;
+      if (isDryRun) {
+        return c.json({ projected: { model: projected.model, messages: projected.messages, tools: projected.tools }, diff: dryDiff });
+      }
+      // otherwise use projected for upstream
+    }
+
+    const isStream = ir.stream === true;
+
+    const cred = await pool.pick();
+    if (!cred) {
+      return c.json({ error: { message: "No credentials available", type: "api_error" } }, 503);
+    }
+
+    const upstreamReq = toUpstreamRequest(projected);
+
+    const signal: AbortSignal | undefined =
+      (c.req as { raw?: Request }).raw?.signal ?? (c.req as { signal?: AbortSignal }).signal;
+    let chunks: AsyncIterable<UpstreamChunk>;
+    try {
+      chunks = upstream.streamChat(upstreamReq, cred, signal);
+    } catch (err) {
+      if (err instanceof UpstreamError) {
+        const mapped = mapUpstreamErrorToHttp(err);
+        return c.json(mapped.body, mapped.status as never);
+      }
+      throw err;
+    }
+
+    if (isStream) {
+      return streamSSE(c, async (stream) => {
+        try {
+          const id = generateId("resp");
+          const created = Math.floor(Date.now() / 1000);
+          for await (const frame of responsesSSEFromUpstream(chunks, { id, model: projected.model, created })) {
+            await stream.write(frame);
+          }
+        } catch (err) {
+          if (err instanceof UpstreamError) {
+            const mapped = mapUpstreamErrorToHttp(err);
+            await stream.write(formatResponsesSSE({ type: "error", error: mapped.body }));
+          } else {
+            logger.error({ err }, "stream responses failed");
+            await stream.write(formatResponsesSSE({ type: "error", error: { message: "upstream stream failed", type: "api_error" } }));
+          }
+        }
+      });
+    } else {
+      try {
+        const id = generateId("resp");
+        const created = Math.floor(Date.now() / 1000);
+        const aggregated = await aggregateStream(chunks, { id, model: projected.model, created });
+        const choice = (aggregated as { choices?: Array<{ message?: { content?: string; tool_calls?: unknown }; finish_reason?: string | null }> }).choices?.[0];
+        const content: string =
+          (choice?.message?.content as string | undefined) ??
+          (aggregated as { content?: string }).content ??
+          "";
+        const tool_calls = (choice?.message?.tool_calls as
+          | Array<{ id: string; type: "function"; function: { name: string; arguments: string } }>
+          | undefined) ?? (aggregated as { tool_calls?: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }> }).tool_calls;
+        const finish_reason: string | null =
+          (choice?.finish_reason as string | null | undefined) ??
+          (aggregated as { finish_reason?: string | null }).finish_reason ??
+          null;
+        const usage = (aggregated as { usage?: unknown }).usage;
+        const body = buildResponsesResponse({ content, tool_calls, finish_reason, usage }, { id, model: projected.model, created });
+        return c.json(body);
+      } catch (err) {
+        if (err instanceof UpstreamError) {
+          const mapped = mapUpstreamErrorToHttp(err);
+          return c.json(mapped.body, mapped.status as never);
+        }
+        logger.error({ err }, "responses failed");
+        return c.json({ error: { message: "upstream request failed", type: "api_error" } }, 502);
+      }
+    }
+  });
+
+  app.get("/v1/responses/:id", async (c) => {
+    const id = c.req.param("id");
+    // stub per contract — previous_response_id statefulness deferred
+    return c.json({ error: { message: `Response ${id} not found — retrieval not implemented`, type: "invalid_request_error" } }, 404);
+  });
+
+  // also handle POST for previous_response_id retrieval via query? keep simple
+}
