@@ -1,0 +1,14 @@
+name: codebuffy
+
+services:
+  gateway:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - CODEBUFFY_HOST=0.0.0.0
+      - CODEBUFFY_PORT=3000
+      # - CODEBUFFY_LOG_LEVEL=debug
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped

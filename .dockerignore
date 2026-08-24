@@ -1,0 +1,13 @@
+node_modules
+data
+dist
+coverage
+reference
+research
+devdocs
+.github
+.git
+.gitignore
+*.log
+Dockerfile
+compose.yaml

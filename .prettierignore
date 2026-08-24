@@ -1,0 +1,9 @@
+node_modules/
+data/
+reference/
+research/
+devdocs/
+dist/
+coverage/
+bun.lock
+*.log

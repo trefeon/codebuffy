@@ -1,0 +1,40 @@
+# Third-party reference clones — study material only, never ours to track
+/reference/
+
+# Private: study/research/dev-process docs are never published (user decision 2026-08-25)
+/research/
+/devdocs/
+/config.json
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+
+# Node / TypeScript
+node_modules/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Go
+bin/
+*.exe
+
+# Local runtime state
+data/
+*.sqlite
+*.sqlite3
+*.db
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
