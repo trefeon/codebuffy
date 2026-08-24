@@ -9,6 +9,8 @@ const ConfigSchema = z.object({
   logLevel: z.enum(LOG_LEVELS).default("info"),
   apiBase: z.string().default("https://copilot.tencent.com"),
   consoleBase: z.string().default("https://www.codebuddy.cn"),
+  dbPath: z.string().min(1).default("data/codebuffy.db"),
+  upstreamTimeoutMs: z.coerce.number().int().min(1000).max(120_000).default(30_000),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
@@ -21,6 +23,8 @@ const ENV_MAP: Record<keyof Config, string> = {
   logLevel: "CODEBUFFY_LOG_LEVEL",
   apiBase: "CODEBUFFY_API_BASE",
   consoleBase: "CODEBUFFY_CONSOLE_BASE",
+  dbPath: "CODEBUFFY_DB_PATH",
+  upstreamTimeoutMs: "CODEBUFFY_UPSTREAM_TIMEOUT_MS",
 };
 
 export type ConfigEnv = Record<string, string | undefined>;
