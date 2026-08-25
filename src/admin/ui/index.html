@@ -3,64 +3,142 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
   <title>Codebuffy — Admin</title>
   <link rel="stylesheet" href="/admin/ui/style.css" />
 </head>
 <body>
-  <header>
-    <div class="wrap">
-      <h1>Codebuffy</h1>
-      <p>Admin — credentials &amp; pool</p>
+  <div class="app" id="app">
+    <nav class="rail" id="rail" aria-label="Primary">
+      <div class="rail-head">
+        <div class="brand">
+          <i class="brand-mark" aria-hidden="true">CB</i>
+          <span class="brand-text">
+            <strong>Codebuffy</strong>
+            <span class="brand-sub">Admin console</span>
+          </span>
+        </div>
+        <button id="railCollapse" class="icon-btn rail-collapse" type="button" aria-label="Collapse navigation" title="Collapse rail">‹</button>
+      </div>
+
+      <div class="rail-nav" role="navigation" aria-label="Sections">
+        <a class="nav-item is-active" href="#/dashboard" data-nav="dashboard" aria-current="page">
+          <span class="nav-ico" aria-hidden="true">⊞</span>
+          <span class="nav-label">Dashboard</span>
+          <span class="nav-badge" id="badge-dashboard">—</span>
+        </a>
+        <a class="nav-item" href="#/credentials" data-nav="credentials">
+          <span class="nav-ico" aria-hidden="true">◈</span>
+          <span class="nav-label">Credentials</span>
+          <span class="nav-badge" id="badge-credentials">—</span>
+        </a>
+        <a class="nav-item" href="#/api-keys" data-nav="api-keys">
+          <span class="nav-ico" aria-hidden="true">⌥</span>
+          <span class="nav-label">API Keys</span>
+          <span class="nav-badge" id="badge-apikeys">—</span>
+        </a>
+        <a class="nav-item" href="#/console" data-nav="console">
+          <span class="nav-ico" aria-hidden="true">▶</span>
+          <span class="nav-label">Console</span>
+        </a>
+        <a class="nav-item" href="#/usage" data-nav="usage">
+          <span class="nav-ico" aria-hidden="true">◷</span>
+          <span class="nav-label">Usage</span>
+        </a>
+        <a class="nav-item" href="#/debug" data-nav="debug">
+          <span class="nav-ico" aria-hidden="true">⬡</span>
+          <span class="nav-label">Debug</span>
+        </a>
+        <a class="nav-item" href="#/settings" data-nav="settings">
+          <span class="nav-ico" aria-hidden="true">⚙</span>
+          <span class="nav-label">Settings</span>
+        </a>
+        <a class="nav-item" href="#/login" data-nav="login">
+          <span class="nav-ico" aria-hidden="true">•</span>
+          <span class="nav-label">Login</span>
+          <span class="nav-badge" id="navLoginBadge" aria-hidden="true">○</span>
+        </a>
+      </div>
+
+      <div class="rail-foot">
+        <div class="mini" aria-live="polite">
+          <div class="mini-title">Pool</div>
+          <div class="mini-grid">
+            <div class="mini-card"><div class="k">size</div><div class="v" id="miniSize">—</div></div>
+            <div class="mini-card"><div class="k">active</div><div class="v" id="miniActive">—</div></div>
+            <div class="mini-card"><div class="k">cooldown</div><div class="v" id="miniCooldown">—</div></div>
+            <div class="mini-card"><div class="k">banned</div><div class="v" id="miniBanned">—</div></div>
+          </div>
+          <div class="mini-meta hint" id="miniMeta">expiringSoon — · store —</div>
+        </div>
+        <div class="foot-note"><span class="dot" id="poolDot" aria-hidden="true"></span><span id="poolNote">pool — · store —</span></div>
+        <div class="hint" style="font-size:11px">Rail 15.5rem desktop → drawer &lt;48rem</div>
+      </div>
+    </nav>
+
+    <div class="main-wrap">
+      <header class="topbar">
+        <button class="burger" id="burger" type="button" aria-label="Open navigation" aria-expanded="false">≡</button>
+        <div class="topbar-title">
+          <h2 id="pageTitle">Dashboard</h2>
+          <div class="bcrumb" id="breadcrumb">Operator console · health, pool, latency</div>
+        </div>
+        <div class="topbar-spacer" aria-hidden="true"></div>
+        <span class="chip warn" id="authChip"><span class="dot warn" aria-hidden="true"></span> no key — open mode</span>
+        <button class="icon-btn" id="themeBtn" type="button" aria-label="Toggle theme" title="Toggle light/dark (520ms)">◐</button>
+      </header>
+
+      <main class="main" id="main">
+        <section id="page-dashboard" data-page="dashboard" class="page is-active" aria-labelledby="pageTitle">
+          <div class="empty" role="status"><strong>Dashboard</strong><span class="hint">Loading… operator console</span></div>
+        </section>
+
+        <section id="page-credentials" data-page="credentials" class="page" hidden>
+          <div class="empty" role="status"><strong>Credentials</strong><span class="hint">Loading… GET /admin/credentials</span></div>
+        </section>
+
+        <section id="page-api-keys" data-page="api-keys" class="page" hidden>
+          <div class="empty" role="status"><strong>API Keys</strong><span class="hint">Loading… downstream + admin</span></div>
+        </section>
+
+        <section id="page-console" data-page="console" class="page" hidden>
+          <div class="empty" role="status"><strong>Console</strong><span class="hint">Loading… POST /v1/chat/completions</span></div>
+        </section>
+
+        <section id="page-usage" data-page="usage" class="page" hidden>
+          <div class="empty" role="status"><strong>Usage</strong><span class="hint">Loading… GET /metrics</span></div>
+        </section>
+
+        <section id="page-debug" data-page="debug" class="page" hidden>
+          <div class="empty" role="status"><strong>Debug</strong><span class="hint">Loading… 4-step trace</span></div>
+        </section>
+
+        <section id="page-settings" data-page="settings" class="page" hidden>
+          <div class="empty" role="status"><strong>Settings</strong><span class="hint">Loading… 15 CODEBUFFY_* vars</span></div>
+        </section>
+
+        <section id="page-login" data-page="login" class="page" hidden>
+          <div class="empty" role="status"><strong>Login</strong><span class="hint">Loading… Bearer gate</span></div>
+        </section>
+
+        <footer class="main-foot hint" aria-live="polite">
+          <span id="footVersion">Codebuffy v0.1.0</span>
+          <span aria-hidden="true"> · </span>
+          <span id="footUptime">uptime —</span>
+          <span aria-hidden="true"> · </span>
+          <span id="footPool">pool —</span>
+          <span aria-hidden="true"> · </span>
+          <a href="#/settings" data-jump="settings">Settings</a>
+        </footer>
+      </main>
     </div>
-  </header>
+  </div>
 
-  <main class="wrap">
-    <section id="auth" aria-labelledby="auth-title">
-      <h2 id="auth-title">Admin key</h2>
-      <div class="row">
-        <input id="adminKey" type="password" placeholder="Bearer token (CODEBUFFY_ADMIN_KEYS)" autocomplete="off" spellcheck="false" aria-label="Admin Bearer token" />
-        <button id="saveKey" class="primary" type="button">Save</button>
-        <button id="clearKey" type="button">Clear</button>
-        <button id="reload" class="ghost" type="button" title="Reload data">Reload</button>
-      </div>
-      <p class="hint">Stored in <code>localStorage</code> (<code>codebuffy_admin_key</code>) and sent as <code>Authorization: Bearer …</code> only to <code>/admin/*</code> on this host. Never logged or appended to URLs.</p>
-      <p id="authStatus" class="hint" role="status" aria-live="polite"></p>
-    </section>
+  <div id="scrim" class="scrim" hidden></div>
+  <div id="toast" aria-live="polite" aria-relevant="additions"></div>
+  <div id="drawerScrim" class="scrim" hidden aria-hidden="true"></div>
+  <div id="toasts" aria-live="polite" aria-relevant="additions" hidden aria-hidden="true"></div>
 
-    <section aria-labelledby="creds-title">
-      <h2 id="creds-title">Credentials</h2>
-      <div style="overflow:auto">
-        <table id="credsTable" aria-describedby="credsHint">
-          <thead>
-            <tr>
-              <th>uid</th>
-              <th>label</th>
-              <th>domain</th>
-              <th>expiresAt</th>
-              <th>state</th>
-              <th>checkin</th>
-              <th>actions</th>
-            </tr>
-          </thead>
-          <tbody id="credsBody">
-            <tr><td colspan="7" class="empty">Loading…</td></tr>
-          </tbody>
-        </table>
-      </div>
-      <p id="credsHint" class="hint"><span id="credsCount">—</span> credentials. Delete is immediate and requires confirmation. Check-in posts to <code>POST /admin/checkin/:uid</code>.</p>
-    </section>
-
-    <section aria-labelledby="pool-title">
-      <h2 id="pool-title">Pool state</h2>
-      <div id="poolSummary" class="kv" aria-live="polite"></div>
-      <div id="poolCards" class="pool-grid"></div>
-      <p class="hint">Polled every 10s from <code>GET /admin/pool/state</code>. Size is total credentials known to pool/store; byState is the state machine counts.</p>
-      <pre id="poolRaw" style="margin-top:12px; padding:10px; background:#f9fafb; border:1px solid var(--border); border-radius:6px; overflow:auto; font-size:12px; line-height:1.4; display:none"></pre>
-    </section>
-  </main>
-
-  <div id="toasts" aria-live="polite" aria-relevant="additions"></div>
-
-  <script src="/admin/ui/app.js" defer></script>
+  <script type="module" src="/admin/ui/app.js"></script>
 </body>
 </html>

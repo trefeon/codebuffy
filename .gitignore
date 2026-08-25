@@ -38,3 +38,10 @@ data/
 Thumbs.db
 Desktop.ini
 .idea/
+
+# Agent skills — local only, never committed (unified .agents only, no .claude)
+.agents/skills/
+.claude/
+# Wireframe/audit artifacts — local only
+local/
+out/

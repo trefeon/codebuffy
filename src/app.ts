@@ -46,17 +46,27 @@ export function createApp(deps: AppDeps): Hono {
       return c.notFound();
     }
   });
-  app.get("/admin/ui/:file", async (c) => {
-    const fileName = c.req.param("file");
-    if (!fileName || fileName.includes("..") || fileName.includes("/") || fileName.includes("\\")) {
-      return c.notFound();
-    }
-    const allowed: Record<string, true> = { "app.js": true, "style.css": true };
-    if (!allowed[fileName]) return c.notFound();
+  app.get("/admin/ui/*", async (c) => {
+    const filePath = c.req.path.replace(/^\/admin\/ui\//, "");
+    if (!filePath || filePath.includes("..") || filePath.includes("\\")) return c.notFound();
+    // allow only known static — prevents path traversal and arbitrary src read
+    const allowed: Record<string, true> = {
+      "app.js": true,
+      "style.css": true,
+      "pages/dashboard.js": true,
+      "pages/credentials.js": true,
+      "pages/api-keys.js": true,
+      "pages/console.js": true,
+      "pages/usage.js": true,
+      "pages/debug.js": true,
+      "pages/settings.js": true,
+      "pages/login.js": true,
+    };
+    if (!allowed[filePath]) return c.notFound();
     try {
-      const file = Bun.file(`src/admin/ui/${fileName}`);
+      const file = Bun.file(`src/admin/ui/${filePath}`);
       if (!(await file.exists())) return c.notFound();
-      const isJs = fileName.endsWith(".js");
+      const isJs = filePath.endsWith(".js");
       const content = await file.text();
       const contentType = isJs ? "application/javascript" : "text/css";
       return new Response(content, { headers: { "Content-Type": contentType } });
@@ -64,7 +74,6 @@ export function createApp(deps: AppDeps): Hono {
       return c.notFound();
     }
   });
-
   // Metrics first so every request is counted, including /healthz & /readyz.
   app.use("*", metricsMiddleware());
   mountMetricsRoutes(app, { config: deps.config });
