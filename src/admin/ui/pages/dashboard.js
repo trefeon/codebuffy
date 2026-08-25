@@ -219,12 +219,12 @@ export function render(container, deps) {
         <span class="badge active" style="margin-left:auto" id="dash-live">live ● 10s</span>
       </div>
       <div class="card-bd" style="display:grid; gap:12px">
-        <div class="metrics" role="list" id="dash-metrics">
-          <div class="card metric" role="listitem" id="m-req"><div class="label">Requests (total)</div><div class="value" id="m-req-v">—</div><div class="sub hint" id="m-req-sub">loading…</div><div class="spark" id="m-req-spark">${sparklineSvg([4,6,5,8,6,9,7,10,8,7])}</div></div>
-          <div class="card metric" role="listitem" id="m-creds"><div class="label">Credentials</div><div class="value" id="m-creds-v">—</div><div class="sub hint" id="m-creds-sub">pool.size</div><div class="spark hint" id="m-creds-note" style="font-size:11px">codebuffy_credentials_total</div></div>
-          <div class="card metric" role="listitem" id="m-active"><div class="label">Active</div><div class="value" id="m-active-v">—</div><div class="sub hint" id="m-active-sub">byState</div><div class="spark" id="m-active-badges"></div></div>
-          <div class="card metric" role="listitem" id="m-p95"><div class="label">p95 latency</div><div class="value" id="m-p95-v">—</div><div class="sub hint" id="m-p95-sub">p50 — · buckets 0.005…5s</div><div class="spark" id="m-p95-bars"></div></div>
-          <div class="card metric" role="listitem" id="m-errs"><div class="label">Upstream errors</div><div class="value" id="m-errs-v">—</div><div class="sub hint" id="m-errs-sub">codebuffy_upstream_errors_total</div><div class="spark" id="m-errs-badges"></div></div>
+        <div class="metrics metrics--hero" role="list" id="dash-metrics">
+          <div class="card metric metric--primary" role="listitem" id="m-req"><div class="label">Requests (total)</div><div class="value" id="m-req-v">—</div><div class="sub hint" id="m-req-sub">loading…</div><div class="spark" id="m-req-spark">${sparklineSvg([4,6,5,8,6,9,7,10,8,7])}</div></div>
+          <div class="card metric metric--compact" role="listitem" id="m-creds"><div class="label">Credentials</div><div class="value" id="m-creds-v">—</div><div class="sub hint" id="m-creds-sub">pool.size</div><div class="spark hint" id="m-creds-note" style="font-size:11px">codebuffy_credentials_total</div></div>
+          <div class="card metric metric--compact" role="listitem" id="m-active"><div class="label">Active</div><div class="value" id="m-active-v">—</div><div class="sub hint" id="m-active-sub">byState</div><div class="spark" id="m-active-badges"></div></div>
+          <div class="card metric metric--primary" role="listitem" id="m-p95"><div class="label">p95 latency</div><div class="value" id="m-p95-v">—</div><div class="sub hint" id="m-p95-sub">p50 — · buckets 0.005…5s</div><div class="spark" id="m-p95-bars"></div></div>
+          <div class="card metric metric--compact" role="listitem" id="m-errs"><div class="label">Upstream errors</div><div class="value" id="m-errs-v">—</div><div class="sub hint" id="m-errs-sub">codebuffy_upstream_errors_total</div><div class="spark" id="m-errs-badges"></div></div>
         </div>
         <div class="two">
           <div class="card">
@@ -585,4 +585,8 @@ export function render(container, deps) {
     if (!document.hidden) load();
   };
   try { document.addEventListener("visibilitychange", _visHandler); } catch {}
+}
+export function destroy() {
+  if (_timer) { try { clearInterval(_timer); } catch {} _timer = null; }
+  if (_visHandler) { try { document.removeEventListener("visibilitychange", _visHandler); } catch {} _visHandler = null; }
 }

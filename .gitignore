@@ -40,7 +40,7 @@ Desktop.ini
 .idea/
 
 # Agent skills — local only, never committed (unified .agents only, no .claude)
-.agents/skills/
+.agents/
 .claude/
 # Wireframe/audit artifacts — local only
 local/

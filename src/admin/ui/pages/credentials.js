@@ -48,7 +48,7 @@ function badgeForState(state) {
   const s = String(state || "").toLowerCase();
   if (s === "active") return `<span class="badge active">active ●</span>`;
   if (s === "cooldown") return `<span class="badge cooldown">cooldown ◐</span>`;
-  if (s === "banned") return `<span class="badge banned">banned ✕</span>`;
+  if (s === "banned") return `<span class="badge banned">banned</span>`;
   if (s === "quota") return `<span class="badge quota">quota ◑</span>`;
   if (!s || s === "—" || s === "null") return `<span class="badge">—</span>`;
   return `<span class="badge">${esc(s)}</span>`;
@@ -139,7 +139,7 @@ export function render(container, deps) {
     </div>
 
     <dialog id="dlg-add" aria-label="Add account" style="border:none; padding:0; border-radius:14px; max-width:560px; width:calc(100% - 32px)">
-      <div class="modal-hd" style="padding:16px; border-bottom:1px solid var(--border, #e5e7eb); display:flex; justify-content:space-between; align-items:center"><strong>Add account</strong><button class="icon-btn" type="button" data-close="dlg-add" aria-label="Close">✕</button></div>
+      <div class="modal-hd" style="padding:16px; border-bottom:1px solid var(--border, #e5e7eb); display:flex; justify-content:space-between; align-items:center"><strong>Add account</strong><button class="icon-btn" type="button" data-close="dlg-add" aria-label="Close"><svg aria-hidden="true" width="16" height="16"><use href="#i-close"></use></svg></button></div>
       <div class="modal-bd" style="padding:16px; display:grid; gap:12px">
         <div class="hint">No raw paste endpoint until encrypted-store lands. Use the onboarding script below — it writes one pool file per account via official flows.</div>
         <div class="card" style="box-shadow:none; background:var(--paper, #f5f3ef)">
@@ -159,7 +159,7 @@ bun scripts/onboard-account.mjs --pool-file data/pool/a1b2.json --verify
     </dialog>
 
     <dialog id="dlg-env" aria-label="Add environment file" style="border:none; padding:0; border-radius:14px; max-width:560px; width:calc(100% - 32px)">
-      <div class="modal-hd" style="padding:16px; border-bottom:1px solid var(--border, #e5e7eb); display:flex; justify-content:space-between; align-items:center"><strong>Add environment file</strong><button class="icon-btn" type="button" data-close="dlg-env" aria-label="Close">✕</button></div>
+      <div class="modal-hd" style="padding:16px; border-bottom:1px solid var(--border, #e5e7eb); display:flex; justify-content:space-between; align-items:center"><strong>Add environment file</strong><button class="icon-btn" type="button" data-close="dlg-env" aria-label="Close"><svg aria-hidden="true" width="16" height="16"><use href="#i-close"></use></svg></button></div>
       <div class="modal-bd" style="padding:16px; display:grid; gap:12px">
         <div class="hint">Paste a <code>.env</code> snippet to import pool files. Wireframe only — real import validates via <code>POST /admin/credentials</code> (future) or writes to <code>data/pool/</code> then restart gateway.</div>
         <textarea class="textarea mono" id="env-text" rows="6" placeholder="CODEBUFFY_DB_PATH=data/codebuffy.db&#10;CODEBUFFY_ENCRYPTION_KEY=...&#10;# pool files live in data/pool/*.json (one per uid)" spellcheck="false"></textarea>
@@ -169,7 +169,7 @@ bun scripts/onboard-account.mjs --pool-file data/pool/a1b2.json --verify
     </dialog>
 
     <dialog id="dlg-bulk" aria-label="Bulk actions" style="border:none; padding:0; border-radius:14px; max-width:560px; width:calc(100% - 32px)">
-      <div class="modal-hd" style="padding:16px; border-bottom:1px solid var(--border, #e5e7eb); display:flex; justify-content:space-between; align-items:center"><strong>Bulk</strong><button class="icon-btn" type="button" data-close="dlg-bulk" aria-label="Close">✕</button></div>
+      <div class="modal-hd" style="padding:16px; border-bottom:1px solid var(--border, #e5e7eb); display:flex; justify-content:space-between; align-items:center"><strong>Bulk</strong><button class="icon-btn" type="button" data-close="dlg-bulk" aria-label="Close"><svg aria-hidden="true" width="16" height="16"><use href="#i-close"></use></svg></button></div>
       <div class="modal-bd" style="padding:16px; display:grid; gap:12px">
         <div class="hint">Select via cards/table checkboxes, then act on all selected. Mirrors olay panel bulkKey/bulkDelete.</div>
         <label class="hint">Paste JSON array to import (future POST /admin/credentials)<textarea class="textarea mono" id="bulk-json" rows="6" placeholder='[{"uid":"a1b2...","label":"acc-1","domain":"copilot.tencent.com"}]' spellcheck="false"></textarea></label>
@@ -179,7 +179,7 @@ bun scripts/onboard-account.mjs --pool-file data/pool/a1b2.json --verify
     </dialog>
 
     <dialog id="dlg-detail" aria-label="Credential detail" style="border:none; padding:0; border-radius:14px; max-width:560px; width:calc(100% - 32px)">
-      <div class="modal-hd" style="padding:16px; border-bottom:1px solid var(--border, #e5e7eb); display:flex; justify-content:space-between; align-items:center"><strong>Details</strong><button class="icon-btn" type="button" data-close="dlg-detail" aria-label="Close">✕</button></div>
+      <div class="modal-hd" style="padding:16px; border-bottom:1px solid var(--border, #e5e7eb); display:flex; justify-content:space-between; align-items:center"><strong>Details</strong><button class="icon-btn" type="button" data-close="dlg-detail" aria-label="Close"><svg aria-hidden="true" width="16" height="16"><use href="#i-close"></use></svg></button></div>
       <div class="modal-bd" style="padding:16px; display:grid; gap:10px">
         <pre id="detail-pre" style="margin:0; padding:12px; background:#0b1220; color:#e2e8f0; border-radius:8px; overflow:auto; font-size:12px; line-height:1.5; max-height:320px"></pre>
         <div class="hint">Source: GET /admin/credentials/:uid + byUid state from pool</div>
@@ -677,4 +677,8 @@ bun scripts/onboard-account.mjs --pool-file data/pool/a1b2.json --verify
   }, 10000);
   _vis = () => { if (!document.hidden) loadPool(); };
   try { document.addEventListener("visibilitychange", _vis); } catch {}
+}
+export function destroy() {
+  if (_poll) { try { clearInterval(_poll); } catch {} _poll = null; }
+  if (_vis) { try { document.removeEventListener("visibilitychange", _vis); } catch {} _vis = null; }
 }

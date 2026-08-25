@@ -56,7 +56,9 @@ export function initTracing(config?: unknown, logger?: unknown): void {
         return;
       }
 
-      const serviceName = cfg?.host ? `codebuffy-${cfg.host}` : "codebuffy";
+      const rawHost = (cfg as Config)?.host;
+      const hostLabel = rawHost && !["0.0.0.0", "::", "0:0:0:0:0:0:0:1"].includes(rawHost) ? rawHost : "";
+      const serviceName = hostLabel ? `codebuffy-${hostLabel}` : "codebuffy";
       const sdk = new NodeSDKCtor({
         serviceName,
       });
@@ -69,7 +71,9 @@ export function initTracing(config?: unknown, logger?: unknown): void {
           })
           .catch((err: unknown) => {
             const message = err instanceof Error ? err.message : String(err);
-            maybeLogger?.warn({ err: message }, "OTel SDK start failed — continuing without tracing");
+            const maybeErr = err as NodeJS.ErrnoException;
+            const code = maybeErr?.code || "UNKNOWN";
+            maybeLogger?.warn({ code, err: message }, "OTel SDK start failed — continuing without tracing");
           });
       } else {
         maybeLogger?.info({ endpoint, serviceName }, "OTel tracing started");
@@ -77,9 +81,11 @@ export function initTracing(config?: unknown, logger?: unknown): void {
     })
     .catch((err: unknown) => {
       const message = err instanceof Error ? err.message : String(err);
+      const maybeErr = err as NodeJS.ErrnoException;
+      const code = maybeErr?.code || "UNKNOWN";
       // Missing optional dep yields MODULE_NOT_FOUND / ERR_MODULE_NOT_FOUND
       maybeLogger?.warn(
-        { err: message },
+        { code, err: message },
         "OTel tracing requested but @opentelemetry/sdk-node not installed — continuing without tracing",
       );
     });

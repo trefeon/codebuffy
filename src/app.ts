@@ -47,8 +47,13 @@ export function createApp(deps: AppDeps): Hono {
     }
   });
   app.get("/admin/ui/*", async (c) => {
-    const filePath = c.req.path.replace(/^\/admin\/ui\//, "");
-    if (!filePath || filePath.includes("..") || filePath.includes("\\")) return c.notFound();
+    const raw = c.req.path.replace(/^\/admin\/ui\//, "");
+    let filePath: string;
+    try {
+      filePath = decodeURIComponent(raw);
+    } catch {
+      return c.notFound();
+    }
     // allow only known static — prevents path traversal and arbitrary src read
     const allowed: Record<string, true> = {
       "app.js": true,
@@ -62,14 +67,24 @@ export function createApp(deps: AppDeps): Hono {
       "pages/settings.js": true,
       "pages/login.js": true,
     };
-    if (!allowed[filePath]) return c.notFound();
+    if (
+      filePath.includes("..") ||
+      filePath.includes("\\") ||
+      filePath.startsWith("/") ||
+      !allowed[filePath]
+    )
+      return c.notFound();
     try {
       const file = Bun.file(`src/admin/ui/${filePath}`);
       if (!(await file.exists())) return c.notFound();
       const isJs = filePath.endsWith(".js");
       const content = await file.text();
-      const contentType = isJs ? "application/javascript" : "text/css";
-      return new Response(content, { headers: { "Content-Type": contentType } });
+      return new Response(content, {
+        headers: {
+          "Content-Type": isJs ? "application/javascript; charset=utf-8" : "text/css; charset=utf-8",
+          "Cache-Control": "public, max-age=3600",
+        },
+      });
     } catch {
       return c.notFound();
     }

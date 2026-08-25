@@ -4,6 +4,9 @@
  * raw JSON view, copy. Falls back to mock when endpoints 404.
  * No console.*, no external deps. ESM.
  */
+let _debugStop = null;
+let _debugVis = null;
+let _debugContainer = null;
 function esc(s) {
   var d = document.createElement("div");
   d.textContent = s == null ? "" : String(s);
@@ -532,6 +535,12 @@ export function render(container, deps) {
     pollTimer = null;
   }
 
+  _debugStop = stopPoll;
+  _debugContainer = container;
+  _debugVis = function () {
+    if (document.hidden) stopPoll();
+    else if (live) startPoll();
+  };
   bindFilters();
   renderReqTable();
   renderLogs();
@@ -539,15 +548,20 @@ export function render(container, deps) {
   fetchRemote();
   if (live) startPoll();
 
-  document.addEventListener("visibilitychange", function () {
-    if (document.hidden) stopPoll();
-    else if (live) startPoll();
-  });
+  document.addEventListener("visibilitychange", _debugVis);
 
   return {
-    destroy: function () { stopPoll(); container.innerHTML = ""; },
+    destroy: function () { try { stopPoll(); } catch {} try { if (_debugVis) document.removeEventListener("visibilitychange", _debugVis); } catch {} _debugVis = null; _debugStop = null; try { container.innerHTML = ""; } catch {} },
     reload: function () { fetchRemote(); }
   };
+}
+export function destroy() {
+  try { if (_debugStop) _debugStop(); } catch {}
+  try { if (_debugVis) document.removeEventListener("visibilitychange", _debugVis); } catch {}
+  _debugVis = null;
+  _debugStop = null;
+  try { if (_debugContainer) _debugContainer.innerHTML = ""; } catch {}
+  _debugContainer = null;
 }
 export function mount(c, d) { return render(c, d); }
 if (typeof window !== "undefined") window.CodebuffyDebugRender = render;

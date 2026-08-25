@@ -5,6 +5,9 @@
  * falls back to mock when parse not yet / metrics disabled.
  * No console.*, no external deps. ESM.
  */
+let _usageStop = null;
+let _usageVis = null;
+let _usageContainer = null;
 function esc(s) {
   var d = document.createElement("div");
   d.textContent = s == null ? "" : String(s);
@@ -556,10 +559,11 @@ export function render(container, deps) {
       renderCredTable();
     });
 
-    document.addEventListener("visibilitychange", function () {
+    _usageVis = function () {
       if (document.hidden) stopPoll();
       else if (state.auto) startPoll();
-    });
+    };
+    document.addEventListener("visibilitychange", _usageVis);
   }
 
   function startPoll() {
@@ -574,6 +578,8 @@ export function render(container, deps) {
     state.timer = null;
   }
 
+  _usageContainer = container;
+  _usageStop = stopPoll;
   bind();
   fetchMetrics();
   fetchCredsForBreakdown();
@@ -581,9 +587,17 @@ export function render(container, deps) {
   if (state.auto) startPoll();
 
   return {
-    destroy: function () { stopPoll(); container.innerHTML = ""; },
+    destroy: function () { try { stopPoll(); } catch {} try { if (_usageVis) document.removeEventListener("visibilitychange", _usageVis); } catch {} _usageVis = null; _usageStop = null; try { container.innerHTML = ""; } catch {} },
     reload: function () { fetchMetrics(); fetchCredsForBreakdown(); }
   };
+}
+export function destroy() {
+  try { if (_usageStop) _usageStop(); } catch {}
+  try { if (_usageVis) document.removeEventListener("visibilitychange", _usageVis); } catch {}
+  _usageVis = null;
+  _usageStop = null;
+  try { if (_usageContainer) _usageContainer.innerHTML = ""; } catch {}
+  _usageContainer = null;
 }
 export function mount(c, d) { return render(c, d); }
 if (typeof window !== "undefined") window.CodebuffyUsageRender = render;

@@ -157,7 +157,7 @@ function setAuthChip(state, msg) {
   } else if (state === "error") {
     chip.className = "chip err";
     chip.innerHTML = '<span class="dot err" aria-hidden="true"></span> 401 invalid';
-    if (badge) badge.textContent = "✕";
+    if (badge) badge.textContent = "!";
   } else if (state === "open") {
     chip.className = "chip warn";
     chip.innerHTML = '<span class="dot warn" aria-hidden="true"></span> no key — open mode';
@@ -215,7 +215,8 @@ async function api(path, opts) {
 let currentPage = "dashboard";
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 let loadingPage = null;
-
+let activeDestroy = null;
+let activePageId = null;
 function setActiveNav(id) {
   const navs = document.querySelectorAll("[data-nav]");
   for (let i = 0; i < navs.length; i++) {
@@ -228,7 +229,16 @@ function setActiveNav(id) {
 
 function showPage(id) {
   const target = normalizeHash(id);
+  if (target !== currentPage && activeDestroy) {
+    try { activeDestroy(); } catch {}
+    activeDestroy = null;
+    try {
+      const prevContainer = activePageId ? document.getElementById("page-" + activePageId) : document.getElementById("page-" + currentPage);
+      if (prevContainer && prevContainer.dataset.loaded === "1") delete prevContainer.dataset.loaded;
+    } catch {}
+  }
   currentPage = target;
+  activePageId = target;
   const pages = document.querySelectorAll(".page");
   for (let i = 0; i < pages.length; i++) {
     const p = pages[i];
@@ -274,21 +284,55 @@ async function loadPage(id) {
     // Use dynamic import with variable — bundler-free
     const mod = await import(url);
     const fn = (mod && mod.render) || (mod && mod.default && mod.default.render) || mod.default;
+    let result = null;
     if (typeof fn === "function") {
       const deps = { api, toast, getKey, setKey, clearKey, theme, headers, setAuthChip };
-      // clear placeholder empty if still there
       // let page own container; pass container directly
-      await fn(container, deps);
+      result = await fn(container, deps);
       container.dataset.loaded = "1";
     } else if (mod && typeof mod.mount === "function") {
       const deps = { api, toast, getKey, setKey, clearKey, theme, headers, setAuthChip };
-      await mod.mount(container, deps);
+      result = await mod.mount(container, deps);
       container.dataset.loaded = "1";
     }
+    let newDestroy = null;
+    if (result && typeof result.destroy === "function") newDestroy = result.destroy;
+    else if (mod && typeof mod.destroy === "function") newDestroy = mod.destroy;
+    else if (mod && mod.default && typeof mod.default.destroy === "function") newDestroy = mod.default.destroy;
+    else if (typeof fn === "function" && typeof fn.destroy === "function") newDestroy = fn.destroy;
+    if (newDestroy) activeDestroy = newDestroy;
   } catch {
     // module not yet available (allowlist not patched or page not yet shipped) — keep shell placeholder
-    // add one-time hint in footer or chip? keep silent to avoid noise; other slices will populate.
-    // If file is login or dashboard and missing, ensure placeholder stays visible (already there).
+  }
+}
+
+let drawerPreviousFocus = null;
+let drawerTrapHandler = null;
+
+function getDrawerFocusables(rail) {
+  if (!rail) return [];
+  return Array.from(rail.querySelectorAll('a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])')).filter(function (el) { return el.getClientRects().length > 0 || el === document.activeElement; });
+}
+
+function trapDrawerTab(e) {
+  if (e.key !== "Tab") return;
+  const rail = document.getElementById("rail");
+  if (!rail || !rail.classList.contains("is-open")) return;
+  const focusable = getDrawerFocusables(rail);
+  if (focusable.length === 0) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  const active = document.activeElement;
+  if (e.shiftKey) {
+    if (active === first || !rail.contains(active)) {
+      e.preventDefault();
+      last.focus();
+    }
+  } else {
+    if (active === last) {
+      e.preventDefault();
+      first.focus();
+    }
   }
 }
 
@@ -296,21 +340,69 @@ function openDrawer() {
   const rail = document.getElementById("rail");
   const scrim = document.getElementById("scrim");
   const drawerScrim = document.getElementById("drawerScrim");
-  if (rail) rail.classList.add("is-open");
+  const mainWrap = document.querySelector(".main-wrap");
+  try {
+    if (document.activeElement instanceof HTMLElement) drawerPreviousFocus = document.activeElement;
+  } catch {}
+  if (rail) {
+    rail.classList.add("is-open");
+    rail.setAttribute("aria-modal", "true");
+    try { rail.setAttribute("role", "dialog"); } catch {}
+  }
+  if (mainWrap) {
+    try { mainWrap.inert = true; } catch {}
+    try { mainWrap.setAttribute("aria-hidden", "true"); } catch {}
+  }
   if (scrim) scrim.hidden = false;
   if (drawerScrim) drawerScrim.hidden = false;
   const b = document.getElementById("burger");
   if (b) b.setAttribute("aria-expanded", "true");
+  const railEl = document.getElementById("rail");
+  if (railEl) {
+    const focusable = getDrawerFocusables(railEl);
+    const target = focusable[0];
+    if (target) try { target.focus({ preventScroll: true }); } catch { try { target.focus(); } catch {} }
+  }
+  if (!drawerTrapHandler && rail) {
+    drawerTrapHandler = trapDrawerTab;
+    rail.addEventListener("keydown", drawerTrapHandler);
+  }
 }
 function closeDrawer() {
   const rail = document.getElementById("rail");
   const scrim = document.getElementById("scrim");
   const drawerScrim = document.getElementById("drawerScrim");
-  if (rail) rail.classList.remove("is-open");
+  const mainWrap = document.querySelector(".main-wrap");
+  const wasOpen = !!(rail && rail.classList.contains("is-open"));
+  if (rail) {
+    rail.classList.remove("is-open");
+    rail.removeAttribute("aria-modal");
+    try { if (rail.getAttribute("role") === "dialog") rail.removeAttribute("role"); } catch {}
+    if (drawerTrapHandler) {
+      try { rail.removeEventListener("keydown", drawerTrapHandler); } catch {}
+    }
+  }
+  drawerTrapHandler = null;
+  if (mainWrap) {
+    try { mainWrap.inert = false; } catch {}
+    try { mainWrap.removeAttribute("aria-hidden"); } catch {}
+  }
   if (scrim) scrim.hidden = true;
   if (drawerScrim) drawerScrim.hidden = true;
   const b = document.getElementById("burger");
   if (b) b.setAttribute("aria-expanded", "false");
+  if (wasOpen && drawerPreviousFocus) {
+    const prev = drawerPreviousFocus;
+    drawerPreviousFocus = null;
+    try {
+      if (prev.isConnected) prev.focus({ preventScroll: true });
+      else if (b) b.focus({ preventScroll: true });
+    } catch {
+      try { if (prev.isConnected) prev.focus(); } catch {}
+    }
+  } else {
+    drawerPreviousFocus = null;
+  }
 }
 
 function toggleRailCollapse() {
@@ -463,7 +555,10 @@ function bindShell() {
   if (railCollapse) railCollapse.addEventListener("click", toggleRailCollapse);
 
   document.addEventListener("keydown", function (e) {
-    if (e.key === "Escape") closeDrawer();
+    if (e.key === "Escape") {
+      if (document.querySelector("dialog[open]")) return;
+      closeDrawer();
+    }
   });
 
   // nav clicks are native <a href="#/…"> — no JS needed, but enhance for active + close

@@ -118,7 +118,7 @@ export function render(container, deps) {
     </div>
 
     <dialog id="dlg-key" aria-label="Create API key" style="border:none; padding:0; border-radius:14px; max-width:560px; width:calc(100% - 32px)">
-      <div class="modal-hd" style="padding:16px; border-bottom:1px solid var(--border, #e5e7eb); display:flex; justify-content:space-between; align-items:center"><strong>Create API key</strong><button class="icon-btn" type="button" data-close="dlg-key" aria-label="Close">✕</button></div>
+      <div class="modal-hd" style="padding:16px; border-bottom:1px solid var(--border, #e5e7eb); display:flex; justify-content:space-between; align-items:center"><strong>Create API key</strong><button class="icon-btn" type="button" data-close="dlg-key" aria-label="Close"><svg aria-hidden="true" width="16" height="16"><use href="#i-close"></use></svg></button></div>
       <div class="modal-bd" style="padding:16px; display:grid; gap:12px">
         <div class="hint">Keys are env-managed. Generate a strong random key locally, add it to your env, then restart the gateway. No vault POST until encrypted-store lands.</div>
         <label class="hint">Label <input class="input" id="key-label" placeholder="Cursor — work laptop" /></label>
@@ -375,4 +375,8 @@ CODEBUFFY_ADMIN_KEYS=adm-zzzz
   // keep fallback banner fresh if shell ever updates env (no poll needed, but listen for vis)
   _visKeys = () => { loadCreds(); };
   try { document.addEventListener("visibilitychange", _visKeys); } catch {}
+}
+export function destroy() {
+  if (_pollKeys) { try { clearInterval(_pollKeys); } catch {} _pollKeys = null; }
+  if (_visKeys) { try { document.removeEventListener("visibilitychange", _visKeys); } catch {} _visKeys = null; }
 }
