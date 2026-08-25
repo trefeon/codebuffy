@@ -16,6 +16,7 @@ export interface Credential {
     source: string;
   };
   apiKey?: { name: string; keyId?: string; fullKey: string };
+  checkinEnabled?: boolean;
 }
 
 /**

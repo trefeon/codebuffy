@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { normalizePoolFile } from "./types";
 import type { Credential } from "./types";
+import type { Logger } from "../logger";
 
 export interface ImportStore {
   upsert(cred: Credential): void | Promise<void>;
@@ -10,12 +11,13 @@ export interface ImportStore {
 /**
  * Scans `poolDir` for `*.json` files, normalizes each via `normalizePoolFile`,
  * and upserts into `store`. Per-file failures (read / parse / normalize /
- * upsert) are counted as `skipped` and a warning is emitted — one bad file
- * never aborts the batch.
+ * upsert) are counted as `skipped` and a warning is emitted via logger when
+ * provided — one bad file never aborts the batch.
  */
 export async function importPoolDir(
   poolDir: string,
   store: ImportStore,
+  logger?: Pick<Logger, "warn">,
 ): Promise<{ imported: number; skipped: number }> {
   let entries: string[];
   try {
@@ -38,8 +40,7 @@ export async function importPoolDir(
       try {
         raw = JSON.parse(text);
       } catch (parseErr) {
-        // eslint-disable-next-line no-console
-        console.warn(`importPoolDir: skipping ${file}: invalid JSON — ${(parseErr as Error).message}`);
+        logger?.warn({ file, err: (parseErr as Error).message }, "importPoolDir: skipping file — invalid JSON");
         skipped++;
         continue;
       }
@@ -48,8 +49,7 @@ export async function importPoolDir(
       try {
         cred = normalizePoolFile(raw);
       } catch (normErr) {
-        // eslint-disable-next-line no-console
-        console.warn(`importPoolDir: skipping ${file}: ${(normErr as Error).message}`);
+        logger?.warn({ file, err: (normErr as Error).message }, "importPoolDir: skipping file — normalize failed");
         skipped++;
         continue;
       }
@@ -57,8 +57,7 @@ export async function importPoolDir(
       await store.upsert(cred);
       imported++;
     } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn(`importPoolDir: skipping ${file}: ${(err as Error).message}`);
+      logger?.warn({ file, err: (err as Error).message }, "importPoolDir: skipping file");
       skipped++;
     }
   }

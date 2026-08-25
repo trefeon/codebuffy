@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Codebuffy — Admin</title>
+  <link rel="stylesheet" href="/admin/ui/style.css" />
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <h1>Codebuffy</h1>
+      <p>Admin — credentials &amp; pool</p>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section id="auth" aria-labelledby="auth-title">
+      <h2 id="auth-title">Admin key</h2>
+      <div class="row">
+        <input id="adminKey" type="password" placeholder="Bearer token (CODEBUFFY_ADMIN_KEYS)" autocomplete="off" spellcheck="false" aria-label="Admin Bearer token" />
+        <button id="saveKey" class="primary" type="button">Save</button>
+        <button id="clearKey" type="button">Clear</button>
+        <button id="reload" class="ghost" type="button" title="Reload data">Reload</button>
+      </div>
+      <p class="hint">Stored in <code>localStorage</code> (<code>codebuffy_admin_key</code>) and sent as <code>Authorization: Bearer …</code> only to <code>/admin/*</code> on this host. Never logged or appended to URLs.</p>
+      <p id="authStatus" class="hint" role="status" aria-live="polite"></p>
+    </section>
+
+    <section aria-labelledby="creds-title">
+      <h2 id="creds-title">Credentials</h2>
+      <div style="overflow:auto">
+        <table id="credsTable" aria-describedby="credsHint">
+          <thead>
+            <tr>
+              <th>uid</th>
+              <th>label</th>
+              <th>domain</th>
+              <th>expiresAt</th>
+              <th>state</th>
+              <th>checkin</th>
+              <th>actions</th>
+            </tr>
+          </thead>
+          <tbody id="credsBody">
+            <tr><td colspan="7" class="empty">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p id="credsHint" class="hint"><span id="credsCount">—</span> credentials. Delete is immediate and requires confirmation. Check-in posts to <code>POST /admin/checkin/:uid</code>.</p>
+    </section>
+
+    <section aria-labelledby="pool-title">
+      <h2 id="pool-title">Pool state</h2>
+      <div id="poolSummary" class="kv" aria-live="polite"></div>
+      <div id="poolCards" class="pool-grid"></div>
+      <p class="hint">Polled every 10s from <code>GET /admin/pool/state</code>. Size is total credentials known to pool/store; byState is the state machine counts.</p>
+      <pre id="poolRaw" style="margin-top:12px; padding:10px; background:#f9fafb; border:1px solid var(--border); border-radius:6px; overflow:auto; font-size:12px; line-height:1.4; display:none"></pre>
+    </section>
+  </main>
+
+  <div id="toasts" aria-live="polite" aria-relevant="additions"></div>
+
+  <script src="/admin/ui/app.js" defer></script>
+</body>
+</html>

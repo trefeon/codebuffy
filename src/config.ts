@@ -3,6 +3,16 @@ import { z } from "zod";
 
 const LOG_LEVELS = ["fatal", "error", "warn", "info", "debug", "trace", "silent"] as const;
 
+function boolFromEnv(val: unknown): unknown {
+  if (typeof val === "boolean") return val;
+  if (typeof val === "string") {
+    const s = val.trim().toLowerCase();
+    if (s === "true" || s === "1" || s === "yes") return true;
+    if (s === "false" || s === "0" || s === "no") return false;
+  }
+  return val;
+}
+
 const ConfigSchema = z.object({
   port: z.coerce.number().int().min(1).max(65535).default(3000),
   host: z.string().default("127.0.0.1"),
@@ -25,6 +35,34 @@ const ConfigSchema = z.object({
       z.array(z.string().min(8)),
     )
     .default([]),
+  // Pool hardening (G6/G9)
+  poolCooldownMs: z.coerce.number().int().min(1000).max(600_000).default(30_000),
+  breakerThreshold: z.coerce.number().int().min(1).max(100).default(5),
+  breakerResetMs: z.coerce.number().int().min(1000).max(600_000).default(60_000),
+  cacheAffinityTtlMs: z.coerce.number().int().min(1000).max(3_600_000).default(300_000),
+  // Observability
+  metricsEnabled: z.preprocess(boolFromEnv, z.boolean()).default(true),
+  // Admin plane
+  adminEnabled: z.preprocess(boolFromEnv, z.boolean()).default(true),
+  adminKeys: z
+    .preprocess(
+      (val) => {
+        if (Array.isArray(val)) return val;
+        if (typeof val === "string")
+          return val
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean);
+        return [];
+      },
+      z.array(z.string().min(8)),
+    )
+    .default([]),
+  // Check-in scheduler
+  checkinEnabled: z.preprocess(boolFromEnv, z.boolean()).default(false),
+  checkinJitterMs: z.coerce.number().int().min(0).max(12 * 3600_000).default(3600000),
+  // Encryption at rest
+  encryptionKey: z.string().optional(),
 });
 export type Config = z.infer<typeof ConfigSchema>;
 export type LogLevel = (typeof LOG_LEVELS)[number];
@@ -39,6 +77,16 @@ const ENV_MAP: Record<keyof Config, string> = {
   dbPath: "CODEBUFFY_DB_PATH",
   upstreamTimeoutMs: "CODEBUFFY_UPSTREAM_TIMEOUT_MS",
   downstreamApiKeys: "CODEBUFFY_API_KEYS",
+  poolCooldownMs: "CODEBUFFY_POOL_COOLDOWN_MS",
+  breakerThreshold: "CODEBUFFY_BREAKER_THRESHOLD",
+  breakerResetMs: "CODEBUFFY_BREAKER_RESET_MS",
+  cacheAffinityTtlMs: "CODEBUFFY_CACHE_AFFINITY_TTL_MS",
+  metricsEnabled: "CODEBUFFY_METRICS_ENABLED",
+  adminEnabled: "CODEBUFFY_ADMIN_ENABLED",
+  adminKeys: "CODEBUFFY_ADMIN_KEYS",
+  checkinEnabled: "CODEBUFFY_CHECKIN_ENABLED",
+  checkinJitterMs: "CODEBUFFY_CHECKIN_JITTER_MS",
+  encryptionKey: "CODEBUFFY_ENCRYPTION_KEY",
 };
 
 export type ConfigEnv = Record<string, string | undefined>;
