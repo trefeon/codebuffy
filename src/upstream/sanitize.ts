@@ -38,15 +38,42 @@ export function sanitizeSystemText(text: string): string {
   return out;
 }
 
+/**
+ * Reasoning-param normalization (CodeBuddy #2071).
+ *
+ * CodeBuddy surfaces model reasoning ONLY when the request carries the exact
+ * CLI pair: reasoning_effort + reasoning_summary:"auto". Its gateway has no
+ * "none"/"off" effort — forwarding one errors (and forcing effort+summary on
+ * plain requests trips its content filter), so:
+ *   - effort "none"/"off" (case-insensitive) is dropped outright;
+ *   - any other explicit string effort without a summary gains "auto";
+ *   - requests carrying neither param are never modified.
+ */
+export function normalizeReasoningParams<T extends object>(body: T): T {
+  const effort = (body as { reasoning_effort?: unknown }).reasoning_effort;
+  if (typeof effort !== "string") return body;
+  const lowered = effort.toLowerCase();
+  if (lowered === "none" || lowered === "off") {
+    const rest = { ...body } as Record<string, unknown>;
+    delete rest.reasoning_effort;
+    return rest as T;
+  }
+  if ((body as { reasoning_summary?: unknown }).reasoning_summary === undefined) {
+    return { ...body, reasoning_summary: "auto" } as T;
+  }
+  return body;
+}
+
 interface SanitizableMessage {
   role: string;
   content: unknown;
 }
 
-/** Returns a shallow-copied body whose system messages are desensitized. */
+/** Returns a shallow-copied body whose system messages are desensitized and reasoning params normalized. */
 export function sanitizeUpstreamBody<T extends { messages?: Array<SanitizableMessage> }>(body: T): T {
-  if (!Array.isArray(body.messages)) return body;
-  const messages = body.messages.map((m) => {
+  const out = normalizeReasoningParams(body);
+  if (!Array.isArray(out.messages)) return out;
+  const messages = out.messages.map((m) => {
     if (m.role !== "system") return m;
     if (typeof m.content === "string") {
       const next = sanitizeSystemText(m.content);
@@ -55,6 +82,6 @@ export function sanitizeUpstreamBody<T extends { messages?: Array<SanitizableMes
     return m;
   });
   // Avoid cloning when nothing changed.
-  if (messages.every((m, i) => m === body.messages![i])) return body;
-  return { ...body, messages };
+  if (messages.every((m, i) => m === out.messages![i])) return out;
+  return { ...out, messages };
 }
