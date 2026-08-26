@@ -3,8 +3,7 @@ import type { Logger } from "../logger";
 import type { Credential } from "./types";
 import { isExpiring } from "./types";
 import { UpstreamError, RETRYABLE_CODES } from "../upstream/errors";
-
-const FINGERPRINT_UA = "CLI/unknown CodeBuddy/2.137.1";
+import { FINGERPRINT_UA } from "../upstream/headers";
 
 export interface RefreshStore {
   get(uid: string): Promise<Credential | null> | Credential | null;

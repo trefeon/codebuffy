@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import type { Credential } from "../credentials/types";
 
 /** Fingerprint UA mandated by research/02 §4 (dsh CLI identity). */
-export const FINGERPRINT_UA = "CLI/unknown CodeBuddy/2.137.1";
+export const FINGERPRINT_UA = "CLI/unknown CodeBuddy/2.139.0";
 
 /**
  * Build the canonical upstream header set for CodeBuddy cloud.
