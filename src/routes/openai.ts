@@ -9,6 +9,7 @@ import { parseOpenAIChatRequest, ParseError } from "../adapters/openai-chat/pars
 import { aggregateStream } from "../adapters/openai-chat/aggregator";
 import { toUpstreamRequest } from "../ir/types";
 import { randomBytes } from "node:crypto";
+import { pushFromUpstreamChunk } from "../observability/usage";
 
 function generateId(prefix = "chatcmpl"): string {
   return `${prefix}-${randomBytes(12).toString("hex")}`;
@@ -117,11 +118,22 @@ export function mountOpenAIRoutes(app: Hono, deps: OpenAIDeps): void {
       const chunks = upstream.streamChat(upstreamReq, cred, signal);
 
       if (isStream) {
-        // Hono streaming SSE
         return streamSSE(c, async (stream) => {
+          let lastId: string | undefined;
+          let lastUsage: unknown;
           try {
             for await (const chunk of chunks) {
+              if (typeof chunk.id === "string" && chunk.id.length > 0) lastId = chunk.id;
+              if (chunk.usage !== undefined) lastUsage = chunk.usage;
               await stream.writeSSE({ data: JSON.stringify(chunk) });
+            }
+            if (lastId || lastUsage !== undefined) {
+              try {
+                pushFromUpstreamChunk({ id: lastId, model: ir.model, usage: lastUsage });
+                logger.info({ id: lastId, model: ir.model }, "usage recorded");
+              } catch (e) {
+                logger.warn({ err: e }, "usage push failed");
+              }
             }
             await stream.writeSSE({ data: "[DONE]" });
           } catch (err) {
@@ -137,9 +149,24 @@ export function mountOpenAIRoutes(app: Hono, deps: OpenAIDeps): void {
       } else {
         const id = generateId("chatcmpl");
         const created = Math.floor(Date.now() / 1000);
-        // Aggregate stream into single JSON
-        // Note: upstream always streams; we consume entirely
-        const aggregated = await aggregateStream(chunks, { id, model: ir.model, created });
+        let lastId: string | undefined;
+        let lastUsage: unknown;
+        const wrapped = (async function* () {
+          for await (const chunk of chunks) {
+            if (typeof chunk.id === "string" && chunk.id.length > 0) lastId = chunk.id;
+            if (chunk.usage !== undefined) lastUsage = chunk.usage;
+            yield chunk;
+          }
+        })();
+        const aggregated = await aggregateStream(wrapped, { id, model: ir.model, created });
+        const finalUsage = aggregated.usage ?? lastUsage;
+        const finalId = lastId ?? (typeof aggregated.id === "string" ? aggregated.id : undefined);
+        try {
+          pushFromUpstreamChunk({ id: finalId, model: ir.model, usage: finalUsage });
+          logger.info({ id: finalId, model: ir.model }, "usage recorded");
+        } catch (e) {
+          logger.warn({ err: e }, "usage push failed");
+        }
         return c.json(aggregated);
       }
     } catch (err) {

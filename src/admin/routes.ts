@@ -4,6 +4,7 @@ import type { Logger } from "../logger";
 import type { CredentialStore } from "../credentials/store";
 import type { Credential } from "../credentials/types";
 import { passkeyNotImplemented } from "./auth";
+import { listUsage } from "../observability/usage";
 
 export interface CheckinSchedulerLike {
   trigger(uid: string): Promise<unknown>;
@@ -118,7 +119,6 @@ export function mountAdminRoutes(app: Hono, deps: MountAdminDeps): void {
   app.post("/admin/auth/passkey", (c) => passkeyNotImplemented(c));
   // Also support GET for discovery
   app.get("/admin/auth/passkey", (c) => passkeyNotImplemented(c));
-
   // POST /admin/checkin/:uid -> delegates to scheduler if present else 501
   app.post("/admin/checkin/:uid", async (c) => {
     if (!store) return c.json({ error: { code: "UNAVAILABLE", message: "store not configured" } }, 503);
@@ -138,5 +138,14 @@ export function mountAdminRoutes(app: Hono, deps: MountAdminDeps): void {
       logger.error({ err: msg, uid }, "checkin trigger failed");
       return c.json({ error: { code: "CHECKIN_FAILED", message: msg } }, 502);
     }
+  });
+
+  // GET /admin/usage — recent request logs with crb- IDs, tokens, cache hit/miss
+  // Query: ?range=today|7d|30d|1h|6h|24h|yesterday|all  (default all)
+  // Auth is via adminAuth middleware mounted in src/app.ts (timingSafeEqual); this handler assumes it.
+  app.get("/admin/usage", (c) => {
+    const range = c.req.query("range") ?? c.req.query("days") ?? undefined;
+    const data = listUsage(range);
+    return c.json({ data });
   });
 }

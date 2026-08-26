@@ -18,6 +18,7 @@ import {
   responsesSSEFromUpstream,
 } from "../adapters/responses/emitter";
 import { randomBytes } from "node:crypto";
+import { pushFromUpstreamChunk } from "../observability/usage";
 
 function generateId(prefix = "resp"): string {
   const sep = prefix.endsWith("_") || prefix.endsWith("-") ? "" : "_";
@@ -131,11 +132,28 @@ export function mountResponsesRoutes(app: Hono, deps: ResponsesDeps): void {
 
     if (isStream) {
       return streamSSE(c, async (stream) => {
+        let lastId: string | undefined;
+        let lastUsage: unknown;
+        const wrapped = (async function* () {
+          for await (const chunk of chunks) {
+            if (typeof chunk.id === "string" && chunk.id.length > 0) lastId = chunk.id;
+            if (chunk.usage !== undefined) lastUsage = chunk.usage;
+            yield chunk;
+          }
+        })();
         try {
           const id = generateId("resp");
           const created = Math.floor(Date.now() / 1000);
-          for await (const frame of responsesSSEFromUpstream(chunks, { id, model: projected.model, created })) {
+          for await (const frame of responsesSSEFromUpstream(wrapped, { id, model: projected.model, created })) {
             await stream.write(frame);
+          }
+          if (lastId || lastUsage !== undefined) {
+            try {
+              pushFromUpstreamChunk({ id: lastId, model: projected.model, usage: lastUsage });
+              logger.info({ id: lastId, model: projected.model }, "usage recorded");
+            } catch (e) {
+              logger.warn({ err: e }, "usage push failed");
+            }
           }
         } catch (err) {
           if (err instanceof UpstreamError) {
@@ -151,20 +169,39 @@ export function mountResponsesRoutes(app: Hono, deps: ResponsesDeps): void {
       try {
         const id = generateId("resp");
         const created = Math.floor(Date.now() / 1000);
-        const aggregated = await aggregateStream(chunks, { id, model: projected.model, created });
-        const choice = (aggregated as { choices?: Array<{ message?: { content?: string; tool_calls?: unknown }; finish_reason?: string | null }> }).choices?.[0];
+        let lastId: string | undefined;
+        let lastUsage: unknown;
+        const wrapped = (async function* () {
+          for await (const chunk of chunks) {
+            if (typeof chunk.id === "string" && chunk.id.length > 0) lastId = chunk.id;
+            if (chunk.usage !== undefined) lastUsage = chunk.usage;
+            yield chunk;
+          }
+        })();
+        const aggregated = await aggregateStream(wrapped, { id, model: projected.model, created });
+        const aggRecord = aggregated as Record<string, unknown>;
+        const aggUsage = (aggRecord.usage as unknown) ?? lastUsage;
+        const aggId = lastId ?? (typeof aggRecord.id === "string" ? (aggRecord.id as string) : undefined);
+        try {
+          pushFromUpstreamChunk({ id: aggId, model: projected.model, usage: aggUsage });
+          logger.info({ id: aggId, model: projected.model }, "usage recorded");
+        } catch (e) {
+          logger.warn({ err: e }, "usage push failed");
+        }
+        const aggChoices = aggRecord.choices as Array<{ message?: { content?: string; tool_calls?: unknown }; finish_reason?: string | null }> | undefined;
+        const choice = aggChoices?.[0];
         const content: string =
           (choice?.message?.content as string | undefined) ??
-          (aggregated as { content?: string }).content ??
+          (typeof aggRecord.content === "string" ? (aggRecord.content as string) : "") ??
           "";
         const tool_calls = (choice?.message?.tool_calls as
           | Array<{ id: string; type: "function"; function: { name: string; arguments: string } }>
-          | undefined) ?? (aggregated as { tool_calls?: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }> }).tool_calls;
+          | undefined) ?? (aggRecord.tool_calls as Array<{ id: string; type: "function"; function: { name: string; arguments: string } }> | undefined);
         const finish_reason: string | null =
           (choice?.finish_reason as string | null | undefined) ??
-          (aggregated as { finish_reason?: string | null }).finish_reason ??
+          (typeof aggRecord.finish_reason === "string" ? (aggRecord.finish_reason as string) : null) ??
           null;
-        const usage = (aggregated as { usage?: unknown }).usage;
+        const usage = aggUsage;
         const body = buildResponsesResponse({ content, tool_calls, finish_reason, usage }, { id, model: projected.model, created });
         return c.json(body);
       } catch (err) {

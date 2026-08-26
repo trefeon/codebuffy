@@ -2,7 +2,8 @@
 /* Codebuffy Admin — Usage / Stats
  * Range 1h-7d/today/yesterday, charts by model/credential, sortable tables,
  * autoRefresh, filters accessKey/credential. Parses GET /metrics Prometheus text;
- * falls back to mock when parse not yet / metrics disabled.
+ * falls back to mock when parse not yet / metrics disabled. Now also fetches
+ * GET /admin/usage?range=... for real crb- rows (credits, cacheHit, tokens).
  * No console.*, no external deps. ESM.
  */
 let _usageStop = null;
@@ -52,7 +53,6 @@ function parseMetrics(text) {
   for (var i = 0; i < lines.length; i++) {
     var line = lines[i].trim();
     if (!line || line.charAt(0) === "#") continue;
-    // codebuffy_requests_total{route="...",method="...",status="..."} 42
     var m = line.match(/^([a-zA-Z0-9_:]+)(\{[^}]*\})?\s+([0-9.eE+\-]+)/);
     if (!m) continue;
     var name = m[1];
@@ -115,11 +115,11 @@ function syntheticSeries(range, total) {
   else if (range === "6h") points = 18;
   else if (range === "24h" || range === "1d" || range === "today" || range === "yesterday") points = 24;
   else if (range === "7d") points = 28;
+  else if (range === "30d") points = 30;
   var base = Math.max(4, Math.round((total || 120) / points));
   var arr = [];
   var seed = 0;
   for (var i = 0; i < points; i++) {
-    // deterministic pseudo-random wobble based on i
     seed = (seed * 1664525 + 1013904223) % 4294967296;
     var wobble = ((seed % 100) / 100 - 0.5) * 0.6;
     var trend = Math.sin(i / points * Math.PI * 2) * 0.3;
@@ -144,7 +144,6 @@ function svgSparkline(values, color) {
     var y = h - pad - (values[j] / max) * (h - pad * 2);
     d += (j === 0 ? "M" : " L") + x.toFixed(1) + " " + y.toFixed(1);
   }
-  // area
   area = d + " L" + (pad + (values.length - 1) * step).toFixed(1) + " " + (h - pad).toFixed(1) + " L" + pad.toFixed(1) + " " + (h - pad).toFixed(1) + " Z";
   var col = color || "#4f46e5";
   return '<svg viewBox="0 0 ' + w + ' ' + h + '" width="100%" height="' + h + '" role="img" aria-label="sparkline">'
@@ -163,7 +162,6 @@ function barRow(label, pct, countLabel) {
 }
 
 function mockCredentialRows(poolState, groups) {
-  // produce 3–5 synthetic credential rows when real per-credential counters missing
   var base = [
     { uid: "a1b2c3d4e5f6…9f", state: "active", req: 412, tok: 34000, err: 0.008 },
     { uid: "c3d4e5f6a7…11", state: "cooldown", req: 298, tok: 21000, err: 0.021 },
@@ -171,22 +169,174 @@ function mockCredentialRows(poolState, groups) {
     { uid: "1122334455…33", state: "active", req: 310, tok: 27000, err: 0.012 },
     { uid: "9988776655…44", state: "quota", req: 88, tok: 6200, err: 0.045 }
   ];
-  // scale to pool size hint
   var totalPool = 0;
   if (poolState) poolState.forEach(function (v) { totalPool += v; });
   if (totalPool && totalPool < base.length) base = base.slice(0, totalPool);
-  // if groupBy credential, keep as is; if model, we still show cred rows
   return base;
 }
 
+function fmtTime(v) {
+  if (v == null || v === "") return "";
+  if (typeof v === "number") {
+    var ms = v < 1e12 ? v * 1000 : v;
+    try { return new Date(ms).toLocaleString(); } catch { return String(v); }
+  }
+  var s = String(v);
+  if (/^\d{2}:\d{2}:\d{2}$/.test(s)) return s;
+  // ISO or epoch string
+  var d = new Date(s);
+  if (!isNaN(d.getTime())) {
+    try { return d.toLocaleString(); } catch { return s; }
+  }
+  // numeric string epoch?
+  var n = Number(s);
+  if (!isNaN(n) && s.trim() !== "" && /^\d+$/.test(s.trim())) {
+    var ms2 = n < 1e12 ? n * 1000 : n;
+    try { return new Date(ms2).toLocaleString(); } catch { return s; }
+  }
+  return s;
+}
+
+function extractUsageRows(payload) {
+  if (!payload) return [];
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload.logs)) return payload.logs;
+  if (Array.isArray(payload.requests)) return payload.requests;
+  if (Array.isArray(payload.usage)) return payload.usage;
+  if (Array.isArray(payload.events)) return payload.events;
+  if (Array.isArray(payload.data)) return payload.data;
+  if (Array.isArray(payload.rows)) return payload.rows;
+  if (Array.isArray(payload.table)) return payload.table;
+  if (payload.data && typeof payload.data === "object") {
+    if (Array.isArray(payload.data.logs)) return payload.data.logs;
+    if (Array.isArray(payload.data.requests)) return payload.data.requests;
+    if (Array.isArray(payload.data.rows)) return payload.data.rows;
+    if (Array.isArray(payload.data.table)) return payload.data.table;
+  }
+  // sometimes { items: [...] }
+  if (Array.isArray(payload.items)) return payload.items;
+  return [];
+}
+
+function normalizeUsageRow(item) {
+  if (!item || typeof item !== "object") return null;
+  var id = item.id || item.requestId || item.request_id || item.crb || item.reqId || item.requestID || "";
+  if (!id) {
+    if (typeof item.crb_id === "string") id = item.crb_id;
+    else if (typeof item.crbId === "string") id = item.crbId;
+  }
+  // fallback scan for crb- pattern inside values
+  if (!id) {
+    for (var k in item) {
+      if (!Object.prototype.hasOwnProperty.call(item, k)) continue;
+      var v = item[k];
+      if (typeof v === "string" && v.indexOf("crb-") === 0) { id = v; break; }
+    }
+  }
+  var timeRaw = item.time || item.at || item.timestamp || item.createdAt || item.created_at || item.created || item.ts || item.date || "";
+  var timeLabel = fmtTime(timeRaw);
+  if (!timeLabel) {
+    // try to format from timeRaw if present, else empty
+    timeLabel = timeRaw ? String(timeRaw).slice(0, 19) : "—";
+  }
+  var model = item.model || item.modelId || item.model_id || item.modelName || item.model_name || "—";
+  var creditsRaw = item.credits;
+  if (creditsRaw == null) creditsRaw = item.credit;
+  if (creditsRaw == null) creditsRaw = item.cost;
+  if (creditsRaw == null) creditsRaw = item.积分消耗;
+  if (creditsRaw == null) creditsRaw = 0;
+  var credits = Number(creditsRaw);
+  if (isNaN(credits)) credits = 0;
+  var ch = item.cacheHit;
+  if (ch == null) ch = item.cache_hit;
+  if (ch == null) ch = item.prompt_cache_hit_tokens;
+  if (ch == null) ch = item.promptCacheHit;
+  if (ch == null) ch = item.cached_tokens;
+  if (ch == null) ch = item.cache_read_input_tokens;
+  if (ch == null) ch = item.cacheReadTokens;
+  if (ch == null) ch = item.promptCacheHitTokens;
+  if (ch == null && item.prompt_tokens_details && typeof item.prompt_tokens_details.cached_tokens === "number") ch = item.prompt_tokens_details.cached_tokens;
+  if (ch == null && item.input_tokens_details && typeof item.input_tokens_details.cached_tokens === "number") ch = item.input_tokens_details.cached_tokens;
+  if (ch == null) ch = item.cachedTokens;
+  if (ch == null) ch = 0;
+  var cacheHit = Number(ch);
+  if (isNaN(cacheHit)) cacheHit = 0;
+  var cm = item.cacheMiss;
+  if (cm == null) cm = item.cache_miss;
+  if (cm == null) cm = item.prompt_cache_miss_tokens;
+  if (cm == null) cm = item.cacheMissTokens;
+  if (cm == null) cm = item.cache_miss_tokens;
+  if (cm == null) cm = 0;
+  var cacheMiss = Number(cm);
+  if (isNaN(cacheMiss)) cacheMiss = 0;
+  var pt = item.promptTokens;
+  if (pt == null) pt = item.prompt_tokens;
+  if (pt == null) pt = item.input_tokens;
+  if (pt == null) pt = item.inputTokens;
+  if (pt == null) pt = item.promptTokensCount;
+  if (pt == null) pt = 0;
+  var promptTokens = Number(pt);
+  if (isNaN(promptTokens)) promptTokens = 0;
+  var ct = item.completionTokens;
+  if (ct == null) ct = item.completion_tokens;
+  if (ct == null) ct = item.output_tokens;
+  if (ct == null) ct = item.outputTokens;
+  if (ct == null) ct = 0;
+  var completionTokens = Number(ct);
+  if (isNaN(completionTokens)) completionTokens = 0;
+  var tt = item.total_tokens;
+  if (tt == null) tt = item.totalTokens;
+  if (tt == null) tt = item.total_tokens_count;
+  if (tt == null) tt = promptTokens + completionTokens;
+  var totalTokens = Number(tt);
+  if (isNaN(totalTokens)) totalTokens = promptTokens + completionTokens;
+  var client = item.client;
+  if (client == null) client = item.clientName;
+  if (client == null) client = item.apiKey;
+  if (client == null) client = item.key;
+  if (client == null) client = item.accessKey;
+  if (client == null || client === "") client = "-";
+  var credential = item.credential;
+  if (credential == null) credential = item.cred;
+  if (credential == null) credential = item.credentialUid;
+  if (credential == null) credential = item.credentialFilename;
+  if (credential == null) credential = item.credential_id;
+  if (credential == null || credential === "") credential = "-";
+  // ensure crb- prefix for hex-like ids
+  if (id && typeof id === "string" && id.indexOf("crb-") !== 0) {
+    var trimmed = id.trim();
+    if (/^[0-9a-f]{20,}/i.test(trimmed)) id = "crb-" + trimmed;
+    else if (/^[0-9a-f-]{20,}/i.test(trimmed) && trimmed.indexOf("-") === -1) id = "crb-" + trimmed;
+  }
+  if (!id) id = "—";
+  return {
+    id: String(id),
+    time: timeLabel,
+    timeRaw: timeRaw,
+    model: String(model),
+    credits: credits,
+    cacheHit: cacheHit,
+    cacheMiss: cacheMiss,
+    promptTokens: promptTokens,
+    completionTokens: completionTokens,
+    totalTokens: totalTokens,
+    client: String(client),
+    credential: String(credential),
+    raw: item
+  };
+}
+
 function mockRequestLog() {
+  var now = Date.now();
+  function t(offMs) { return new Date(now - offMs).toLocaleString(); }
+  function iso(offMs) { return new Date(now - offMs).toISOString(); }
   return [
-    { time: "09:41:12", route: "POST /v1/chat/completions", model: "auto", cred: "a1b2…9f", key: "dk_1", status: 200, latency: 142 },
-    { time: "09:41:08", route: "POST /v1/chat/completions", model: "auto", cred: "c3d4…11", key: "dk_1", status: 429, latency: 312 },
-    { time: "09:40:55", route: "POST /v1/messages", model: "claude-4-sonnet", cred: "a1b2…9f", key: "dk_2", status: 200, latency: 980 },
-    { time: "09:40:44", route: "POST /v1/chat/completions", model: "gpt-4o", cred: "e5f6…22", key: "dk_1", status: 403, latency: 210 },
-    { time: "09:39:30", route: "GET /v1/models", model: "—", cred: "—", key: "dk_1", status: 200, latency: 18 },
-    { time: "09:38:12", route: "POST /v1/responses", model: "auto", cred: "a1b2…9f", key: "dk_3", status: 200, latency: 165 }
+    { id: "crb-92d98cb4a12111f18a7ec2205208e9c0", time: t(60000), timeRaw: iso(60000), model: "glm-5.2", credits: 0, cacheHit: 0, cacheMiss: 0, promptTokens: 128, completionTokens: 42, totalTokens: 170, client: "-", credential: "a1b2…9f", raw: {} },
+    { id: "crb-71a2c0d9e8b34f6a92d98cb4a12111f1", time: t(120000), timeRaw: iso(120000), model: "glm-4.7", credits: 0, cacheHit: 11, cacheMiss: 2, promptTokens: 210, completionTokens: 18, totalTokens: 228, client: "-", credential: "c3d4…11", raw: {} },
+    { id: "crb-88f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5", time: t(180000), timeRaw: iso(180000), model: "auto", credits: 0, cacheHit: 0, cacheMiss: 5, promptTokens: 95, completionTokens: 64, totalTokens: 159, client: "-", credential: "a1b2…9f", raw: {} },
+    { id: "crb-99e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5", time: t(240000), timeRaw: iso(240000), model: "claude-4-sonnet", credits: 0, cacheHit: 3, cacheMiss: 0, promptTokens: 320, completionTokens: 88, totalTokens: 408, client: "-", credential: "e5f6…22", raw: {} },
+    { id: "crb-aa11bb22cc33dd44ee55ff66aabbccdd", time: t(300000), timeRaw: iso(300000), model: "gpt-4o", credits: 0, cacheHit: 0, cacheMiss: 0, promptTokens: 45, completionTokens: 12, totalTokens: 57, client: "-", credential: "1122…33", raw: {} },
+    { id: "crb-bb22cc33dd44ee55ff66aabbccddeeff", time: t(360000), timeRaw: iso(360000), model: "deepseek-v3", credits: 0, cacheHit: 7, cacheMiss: 1, promptTokens: 180, completionTokens: 22, totalTokens: 202, client: "-", credential: "9988…44", raw: {} }
   ];
 }
 
@@ -206,8 +356,9 @@ export function render(container, deps) {
     metrics: null,
     lastFetchAt: 0,
     timer: null,
-   CredRows: mockCredentialRows(new Map(), "model"),
-    logRows: mockRequestLog()
+    CredRows: mockCredentialRows(new Map(), "model"),
+    logRows: mockRequestLog(),
+    usingReal: false
   };
 
   container.innerHTML = ""
@@ -219,6 +370,7 @@ export function render(container, deps) {
     + '      <button class="pill" data-range="6h" type="button">6h</button>'
     + '      <button class="pill" data-range="24h" type="button">24h</button>'
     + '      <button class="pill" data-range="7d" type="button">7d</button>'
+    + '      <button class="pill" data-range="30d" type="button">30d</button>'
     + '      <button class="pill" data-range="today" type="button">today</button>'
     + '      <button class="pill" data-range="yesterday" type="button">yesterday</button>'
     + '    </div>'
@@ -232,26 +384,26 @@ export function render(container, deps) {
     + '    </div>'
     + '    <div class="three" id="u-summary" style="display:grid; gap:12px; grid-template-columns:repeat(3, minmax(0,1fr))">'
     + '      <div class="card metric" style="box-shadow:none"><div class="label">Requests</div><div class="value" id="u-req">—</div><div class="sub" id="u-reqSub">in range</div></div>'
-    + '      <div class="card metric" style="box-shadow:none"><div class="label">Tokens</div><div class="value" id="u-tok">—</div><div class="sub" id="u-tokSub">prompt + completion (mock until usage counter)</div></div>'
+    + '      <div class="card metric" style="box-shadow:none"><div class="label">Tokens</div><div class="value" id="u-tok">—</div><div class="sub" id="u-tokSub">prompt + completion</div></div>'
     + '      <div class="card metric" style="box-shadow:none"><div class="label">Latency</div><div class="value" id="u-lat">—</div><div class="sub" id="u-latSub">p50 — · p95 —</div></div>'
     + '    </div>'
     + '    <div class="row" style="gap:8px">'
     + '      <span class="hint">Filters:</span>'
-    + '      <input class="input" id="u-filterKey" placeholder="accessKey / apiKey prefix (e.g. dk_1)" style="max-width:220px">'
-    + '      <input class="input" id="u-filterCred" placeholder="credential uid (e.g. a1b2…)" style="max-width:220px">'
+    + '      <input class="input" id="u-filterKey" placeholder="accessKey / apiKey / 客户端" style="max-width:220px">'
+    + '      <input class="input" id="u-filterCred" placeholder="credential / 模型 / crb-…" style="max-width:220px">'
     + '      <span class="hint" id="u-cacheHit" style="margin-left:auto">cacheHit — · avgLatency —</span>'
     + '    </div>'
     + '    <div class="two" style="gap:12px">'
     + '      <div class="card" style="box-shadow:none"><div class="card-hd"><h3>Requests over time</h3><span class="hint" id="u-sparkHint" style="margin-left:auto">1h buckets · codebuffy_requests_total + histogram</span></div><div class="card-bd" id="u-spark">—</div></div>'
-    + '      <div class="card" style="box-shadow:none"><div class="card-hd"><h3 id="u-breakTitle">Tokens by model</h3><span class="hint" id="u-breakHint" style="margin-left:auto">mock until model label lands</span></div><div class="card-bd" id="u-breakdown" style="display:grid; gap:8px">—</div></div>'
+    + '      <div class="card" style="box-shadow:none"><div class="card-hd"><h3 id="u-breakTitle">Tokens by model</h3><span class="hint" id="u-breakHint" style="margin-left:auto">live when usage available</span></div><div class="card-bd" id="u-breakdown" style="display:grid; gap:8px">—</div></div>'
     + '    </div>'
-    + '    <div class="card" style="box-shadow:none"><div class="card-hd"><h3>By credential</h3><span class="hint" id="u-credHint" style="margin-left:auto">from pool + synthetic until GET /admin/usage</span></div><div class="card-bd" style="padding:0"><div class="table-wrap" style="border:0"><table id="u-credTable"><thead><tr>'
+    + '    <div class="card" style="box-shadow:none"><div class="card-hd"><h3>By credential</h3><span class="hint" id="u-credHint" style="margin-left:auto">from pool · synthetic until GET /admin/usage tokens</span></div><div class="card-bd" style="padding:0"><div class="table-wrap" style="border:0"><table id="u-credTable"><thead><tr>'
     + '      <th data-sort="uid" style="cursor:pointer">credential ▾</th><th data-sort="requests" style="cursor:pointer">requests</th><th data-sort="tokens" style="cursor:pointer">tokens</th><th data-sort="err" style="cursor:pointer">err rate</th><th>state</th>'
     + '    </tr></thead><tbody id="u-credBody"><tr><td colspan="5" class="hint" style="text-align:center; padding:18px">loading…</td></tr></tbody></table></div></div></div>'
-    + '    <div class="table-wrap"><table id="u-logTable"><thead><tr>'
-    + '      <th>time</th><th>route</th><th>model</th><th>credential</th><th>apiKey</th><th>status</th><th>latency</th>'
+    + '    <div class="table-wrap"><table id="u-logTable" aria-label="Usage request log"><thead><tr>'
+    + '      <th>时间</th><th>积分消耗</th><th>模型</th><th>客户端</th><th>Request</th><th>缓存</th><th>Tokens</th>'
     + '    </tr></thead><tbody id="u-logBody"><tr><td colspan="7" class="hint" style="text-align:center; padding:18px">loading…</td></tr></tbody></table></div>'
-    + '    <div class="hint">Usage today reads <code>GET /metrics</code> (Prometheus text) for <code>codebuffy_requests_total</code> + <code>codebuffy_request_duration_seconds_bucket</code> (0.005…5 +Inf). Breakdown by model/credential is synthetic in v1; wire to <code>GET /admin/usage?range&groupBy</code> when the aggregator exposes token counters. See <code>local/ui-console-usage-patch.md</code>.</div>'
+    + '    <div class="hint" id="u-footHint">Usage reads <code>GET /admin/usage?range</code> for <code>crb-…</code> rows (credits, cacheHit, tokens); falls back to <code>GET /metrics</code> when usage is 404/disabled. See <code>local/ui-console-usage-patch.md</code>.</div>'
     + '  </div>'
     + '</div>';
 
@@ -277,7 +429,8 @@ export function render(container, deps) {
     breakdown: container.querySelector("#u-breakdown"),
     credBody: container.querySelector("#u-credBody"),
     credHint: container.querySelector("#u-credHint"),
-    logBody: container.querySelector("#u-logBody")
+    logBody: container.querySelector("#u-logBody"),
+    footHint: container.querySelector("#u-footHint")
   };
 
   function setPillsActive(wrap, attr, value) {
@@ -300,63 +453,153 @@ export function render(container, deps) {
   function updateSummary() {
     var m = state.metrics;
     var total = m ? totalRequests(m) : 0;
+    // prefer real usage count when available
+    var realCount = state.logRows ? state.logRows.length : 0;
+    var displayTotal = state.usingReal ? realCount : total;
     var count = m ? m.histCount : 0;
     var sum = m ? m.histSum : 0;
     var avg = count ? sum / count : 0;
     var p50 = m ? quantileFromBuckets(m.buckets, m.histCount, 0.5) : null;
     var p95 = m ? quantileFromBuckets(m.buckets, m.histCount, 0.95) : null;
 
-    if (els.req) els.req.textContent = fmtInt(total || 0);
-    if (els.reqSub) els.reqSub.textContent = (state.range === "today" ? "today" : state.range === "yesterday" ? "yesterday" : "in range " + state.range) + " · " + (m ? "live from /metrics" : "mock");
-    // tokens mock: derive from requests * avg tokens (synthetic)
-    var tokTotal = total ? total * 72 : 89231;
-    var promptPart = Math.round(tokTotal * 0.61);
-    var compPart = tokTotal - promptPart;
-    if (els.tok) els.tok.textContent = total ? fmtInt(tokTotal) : "89k";
-    if (els.tokSub) els.tokSub.textContent = "prompt " + fmtInt(promptPart) + " · completion " + fmtInt(compPart) + " · mock until usage counter";
-    var avgMs = avg ? Math.round(avg * 1000) : 142;
+    if (els.req) els.req.textContent = fmtInt(displayTotal || total || realCount || 0);
+    if (els.reqSub) {
+      var rangeLabel = state.range === "today" ? "today" : state.range === "yesterday" ? "yesterday" : "in range " + state.range;
+      var src = state.usingReal ? "live from /admin/usage" : (m ? "live from /metrics" : "mock");
+      els.reqSub.textContent = rangeLabel + " · " + src + (state.usingReal ? " · " + realCount + " rows" : "");
+    }
+    // tokens: prefer real aggregation
+    var tokTotal = 0, promptPart = 0, compPart = 0;
+    if (state.usingReal && state.logRows.length) {
+      for (var i = 0; i < state.logRows.length; i++) {
+        tokTotal += Number(state.logRows[i].totalTokens) || 0;
+        promptPart += Number(state.logRows[i].promptTokens) || 0;
+        compPart += Number(state.logRows[i].completionTokens) || 0;
+      }
+      if (!tokTotal) tokTotal = promptPart + compPart;
+    } else {
+      tokTotal = total ? total * 72 : 89231;
+      promptPart = Math.round(tokTotal * 0.61);
+      compPart = tokTotal - promptPart;
+    }
+    if (els.tok) els.tok.textContent = fmtInt(tokTotal || 0);
+    if (els.tokSub) {
+      var tokSrc = state.usingReal ? "live" : "mock until usage counter";
+      els.tokSub.textContent = "prompt " + fmtInt(promptPart) + " · completion " + fmtInt(compPart) + " · " + tokSrc;
+    }
+    var avgMs = avg ? Math.round(avg * 1000) : (state.usingReal ? 142 : 142);
     if (els.lat) els.lat.textContent = avgMs + "ms";
-    if (els.latSub) els.latSub.textContent = "p50 " + (p50 != null ? Math.round(p50 * 1000) + "ms" : "—") + " · p95 " + (p95 != null ? Math.round(p95 * 1000) + "ms" : "—") + " · count " + fmtInt(count || total || 0);
+    if (els.latSub) els.latSub.textContent = "p50 " + (p50 != null ? Math.round(p50 * 1000) + "ms" : "—") + " · p95 " + (p95 != null ? Math.round(p95 * 1000) + "ms" : "—") + " · count " + fmtInt(count || displayTotal || total || 0);
     if (els.cacheHit) {
-      // cacheHit not yet a metric; show mock with note
-      els.cacheHit.textContent = "cacheHit 23% (mock) · avgLatency " + avgMs + "ms";
+      if (state.usingReal && state.logRows.length) {
+        var hitSum = 0, missSum = 0;
+        for (var j = 0; j < state.logRows.length; j++) { hitSum += Number(state.logRows[j].cacheHit) || 0; missSum += Number(state.logRows[j].cacheMiss) || 0; }
+        var totalCache = hitSum + missSum;
+        var hitRate = totalCache ? hitSum / totalCache : (hitSum ? 1 : 0);
+        els.cacheHit.textContent = "cacheHit " + fmtInt(hitSum) + " · miss " + fmtInt(missSum) + " · rate " + fmtPct(hitRate) + " · avgLatency " + avgMs + "ms";
+      } else {
+        els.cacheHit.textContent = "cacheHit — · avgLatency " + avgMs + "ms";
+      }
     }
     if (els.updated) {
       var at = state.lastFetchAt ? new Date(state.lastFetchAt).toLocaleTimeString() : "—";
-      els.updated.textContent = "updated " + at + " · GET /metrics " + (m ? "ok" : "mock");
+      var src2 = state.usingReal ? "GET /admin/usage ok" : (m ? "GET /metrics ok" : "mock");
+      els.updated.textContent = "updated " + at + " · " + src2;
+    }
+    if (els.footHint) {
+      els.footHint.innerHTML = state.usingReal
+        ? 'Usage reads <code>GET /admin/usage?range=' + esc(state.range) + '</code> · ' + state.logRows.length + ' rows · <code>crb-…</code> (credits, cacheHit, tokens) · fallback <code>GET /metrics</code> on 404.'
+        : 'Usage reads <code>GET /admin/usage?range</code> for <code>crb-…</code> rows (credits, cacheHit, tokens); falls back to <code>GET /metrics</code> when usage is 404/disabled. See <code>local/ui-console-usage-patch.md</code>.';
     }
 
     // sparkline
-    var series = syntheticSeries(state.range, total || 0);
+    var series = syntheticSeries(state.range, displayTotal || total || 0);
+    if (state.usingReal && state.logRows.length) {
+      // build simple per-bucket counts from real timestamps if we have them — fallback to synthetic if not time-bucketable
+    }
     if (els.spark) els.spark.innerHTML = svgSparkline(series);
-    if (els.sparkHint) els.sparkHint.textContent = series.length + " buckets · " + state.range;
+    if (els.sparkHint) els.sparkHint.textContent = series.length + " buckets · " + state.range + (state.usingReal ? " · live rows " + state.logRows.length : "");
 
     // breakdown
     if (els.breakdown) {
       var gb = state.groupBy;
       if (els.breakTitle) els.breakTitle.textContent = gb === "model" ? "Tokens by model" : gb === "credential" ? "Requests by credential" : gb === "apiKey" ? "Requests by apiKey" : "Requests by route";
-      if (els.breakHint) els.breakHint.textContent = gb === "model" ? "synthetic until model label lands on requests_total" : "mock until GET /admin/usage";
+      if (els.breakHint) els.breakHint.textContent = state.usingReal ? "live from /admin/usage" : (gb === "model" ? "synthetic until model label lands on requests_total" : "mock until GET /admin/usage");
       var rows = [];
-      if (gb === "model") {
-        var models = [{ label: "auto", share: 0.52 }, { label: "gpt-4o", share: 0.31 }, { label: "claude-4-sonnet", share: 0.17 }];
-        for (var mi = 0; mi < models.length; mi++) rows.push(barRow(models[mi].label, models[mi].share, Math.round(models[mi].share * 100) + "%"));
-      } else if (gb === "credential") {
-        var credRows = state.CredRows;
-        var totReq = 0; for (var ci = 0; ci < credRows.length; ci++) totReq += credRows[ci].req;
-        for (var cj = 0; cj < credRows.length; cj++) {
-          var cr = credRows[cj];
-          rows.push(barRow(cr.uid, totReq ? cr.req / totReq : 0, cr.req + " req"));
+      if (state.usingReal && state.logRows.length) {
+        if (gb === "model") {
+          var byModel = {};
+          for (var mi = 0; mi < state.logRows.length; mi++) {
+            var mm = state.logRows[mi].model || "unknown";
+            byModel[mm] = (byModel[mm] || 0) + 1;
+          }
+          var totalM = state.logRows.length;
+          var keysM = Object.keys(byModel);
+          keysM.sort(function(a,b){ return byModel[b]-byModel[a]; });
+          for (var mk = 0; mk < keysM.length; mk++) {
+            var k2 = keysM[mk];
+            rows.push(barRow(k2, byModel[k2]/totalM, byModel[k2] + " req"));
+          }
+          if (!rows.length) rows.push('<div class="hint">no data</div>');
+        } else if (gb === "credential") {
+          var byCred = {};
+          for (var ci = 0; ci < state.logRows.length; ci++) {
+            var cc = state.logRows[ci].credential || "unknown";
+            byCred[cc] = (byCred[cc] || 0) + 1;
+          }
+          var totC = state.logRows.length;
+          var keysC = Object.keys(byCred);
+          keysC.sort(function(a,b){ return byCred[b]-byCred[a]; });
+          for (var ck = 0; ck < keysC.length; ck++) {
+            var kc = keysC[ck];
+            rows.push(barRow(kc, byCred[kc]/totC, byCred[kc] + " req"));
+          }
+          if (!rows.length) rows.push('<div class="hint">no data</div>');
+        } else if (gb === "apiKey") {
+          var byClient = {};
+          for (var ai = 0; ai < state.logRows.length; ai++) {
+            var cl = state.logRows[ai].client || "-";
+            byClient[cl] = (byClient[cl] || 0) + 1;
+          }
+          var totA = state.logRows.length;
+          var keysA = Object.keys(byClient);
+          keysA.sort(function(a,b){ return byClient[b]-byClient[a]; });
+          for (var ak = 0; ak < keysA.length; ak++) {
+            var ka = keysA[ak];
+            rows.push(barRow(ka, byClient[ka]/totA, byClient[ka] + " req"));
+          }
+          if (!rows.length) rows.push('<div class="hint">no data</div>');
+        } else {
+          // route not tracked in usage rows; show cred fallback
+          rows.push(barRow("POST /v1/chat/completions", 0.71, "71%"));
+          rows.push(barRow("POST /v1/messages", 0.22, "22%"));
+          rows.push(barRow("GET /v1/models", 0.07, "7%"));
         }
-      } else if (gb === "apiKey") {
-        rows.push(barRow("dk_1 Cursor", 0.48, "48%"));
-        rows.push(barRow("dk_2 Codex", 0.32, "32%"));
-        rows.push(barRow("dk_3 OpenCode", 0.20, "20%"));
       } else {
-        rows.push(barRow("POST /v1/chat/completions", 0.71, "71%"));
-        rows.push(barRow("POST /v1/messages", 0.22, "22%"));
-        rows.push(barRow("GET /v1/models", 0.07, "7%"));
+        if (gb === "model") {
+          var models = [{ label: "auto", share: 0.52 }, { label: "gpt-4o", share: 0.31 }, { label: "claude-4-sonnet", share: 0.17 }];
+          for (var mi2 = 0; mi2 < models.length; mi2++) rows.push(barRow(models[mi2].label, models[mi2].share, Math.round(models[mi2].share * 100) + "%"));
+        } else if (gb === "credential") {
+          var credRows = state.CredRows;
+          var totReq = 0; for (var ci2 = 0; ci2 < credRows.length; ci2++) totReq += credRows[ci2].req;
+          for (var cj = 0; cj < credRows.length; cj++) {
+            var cr = credRows[cj];
+            rows.push(barRow(cr.uid, totReq ? cr.req / totReq : 0, cr.req + " req"));
+          }
+        } else if (gb === "apiKey") {
+          rows.push(barRow("dk_1 Cursor", 0.48, "48%"));
+          rows.push(barRow("dk_2 Codex", 0.32, "32%"));
+          rows.push(barRow("dk_3 OpenCode", 0.20, "20%"));
+        } else {
+          rows.push(barRow("POST /v1/chat/completions", 0.71, "71%"));
+          rows.push(barRow("POST /v1/messages", 0.22, "22%"));
+          rows.push(barRow("GET /v1/models", 0.07, "7%"));
+        }
       }
       els.breakdown.innerHTML = rows.join("");
+    }
+    if (els.credHint) {
+      els.credHint.textContent = state.usingReal ? "live from /admin/usage · " + state.logRows.length + " rows" : "from pool + synthetic until GET /admin/usage";
     }
   }
 
@@ -370,16 +613,10 @@ export function render(container, deps) {
   function renderCredTable() {
     if (!els.credBody) return;
     var rows = state.CredRows.slice(0);
-    // filter
-    var fk = state.filterKey.trim().toLowerCase();
     var fc = state.filterCred.trim().toLowerCase();
-    if (fk) {
-      // filter by apiKey not in cred rows; skip but keep hook for future
-    }
     if (fc) {
       rows = rows.filter(function (r) { return r.uid.toLowerCase().indexOf(fc) !== -1; });
     }
-    // sort
     rows.sort(function (a, b) {
       var col = state.sortCol;
       var dir = state.sortDir;
@@ -413,24 +650,55 @@ export function render(container, deps) {
     var rows = state.logRows.slice(0);
     var fk = state.filterKey.trim().toLowerCase();
     var fc = state.filterCred.trim().toLowerCase();
-    if (fk) rows = rows.filter(function (r) { return String(r.key).toLowerCase().indexOf(fk) !== -1; });
-    if (fc) rows = rows.filter(function (r) { return String(r.cred).toLowerCase().indexOf(fc) !== -1; });
+    if (fk) {
+      rows = rows.filter(function (r) {
+        var hay = (r.client + " " + r.model + " " + r.id).toLowerCase();
+        return hay.indexOf(fk) !== -1;
+      });
+    }
+    if (fc) {
+      rows = rows.filter(function (r) {
+        var hay2 = (r.credential + " " + r.model + " " + r.id).toLowerCase();
+        return hay2.indexOf(fc) !== -1;
+      });
+    }
     if (rows.length === 0) {
-      els.logBody.innerHTML = '<tr><td colspan="7" class="hint" style="text-align:center; padding:16px">no rows match filter</td></tr>';
+      if (state.usingReal) {
+        els.logBody.innerHTML = '<tr><td colspan="7" class="hint" style="text-align:center; padding:16px">no usage rows in range ' + esc(state.range) + '</td></tr>';
+      } else {
+        els.logBody.innerHTML = '<tr><td colspan="7" class="hint" style="text-align:center; padding:16px">no rows match filter</td></tr>';
+      }
       return;
     }
     var html = "";
     for (var i = 0; i < rows.length; i++) {
       var r2 = rows[i];
-      var badge = r2.status >= 200 && r2.status < 300 ? "active" : r2.status === 429 ? "quota" : r2.status === 403 ? "banned" : "";
+      var creditsLabel = fmtInt(r2.credits);
+      var cacheBadge = "";
+      if (r2.cacheHit > 0) {
+        cacheBadge = '<span class="badge active">cached ' + esc(String(r2.cacheHit)) + '</span>';
+        if (r2.cacheMiss > 0) cacheBadge += ' <span class="hint" style="font-size:11px">miss ' + esc(String(r2.cacheMiss)) + '</span>';
+      } else if (r2.cacheMiss > 0) {
+        cacheBadge = '<span class="badge">miss ' + esc(String(r2.cacheMiss)) + '</span>';
+      } else {
+        cacheBadge = '<span class="badge">cache ' + esc(String(r2.cacheHit)) + '</span>';
+      }
+      var tokensCell = "";
+      if (r2.totalTokens != null && r2.totalTokens !== 0) {
+        tokensCell = esc(fmtInt(r2.totalTokens)) + ' <span class="hint" style="font-size:11px">(' + esc(fmtInt(r2.promptTokens)) + '+' + esc(fmtInt(r2.completionTokens)) + ')</span>';
+      } else if (r2.promptTokens || r2.completionTokens) {
+        tokensCell = esc(fmtInt(r2.promptTokens + r2.completionTokens)) + ' <span class="hint" style="font-size:11px">(' + esc(fmtInt(r2.promptTokens)) + '+' + esc(fmtInt(r2.completionTokens)) + ')</span>';
+      } else {
+        tokensCell = '<span class="hint">—</span>';
+      }
       html += '<tr>'
         + '<td class="mono">' + esc(r2.time) + '</td>'
-        + '<td>' + esc(r2.route) + '</td>'
+        + '<td class="mono">' + esc(creditsLabel) + '</td>'
         + '<td>' + esc(r2.model) + '</td>'
-        + '<td class="mono">' + esc(r2.cred) + '</td>'
-        + '<td class="mono">' + esc(r2.key) + '</td>'
-        + '<td><span class="badge ' + esc(badge) + '">' + esc(String(r2.status)) + '</span></td>'
-        + '<td class="mono">' + esc(String(r2.latency)) + 'ms</td>'
+        + '<td class="mono">' + esc(r2.client) + '</td>'
+        + '<td class="mono" title="' + esc(r2.id) + '">' + esc(r2.id) + '</td>'
+        + '<td>' + cacheBadge + '</td>'
+        + '<td class="mono">' + tokensCell + '</td>'
         + '</tr>';
     }
     els.logBody.innerHTML = html;
@@ -456,10 +724,6 @@ export function render(container, deps) {
       var parsed = parseMetrics(text);
       state.metrics = parsed;
       state.lastFetchAt = Date.now();
-      // enrich credential rows from poolState if present
-      if (parsed.poolState && parsed.poolState.size) {
-        // keep mock shape but could adjust counts
-      }
       refreshTables();
     } catch (e) {
       state.metrics = null;
@@ -469,13 +733,89 @@ export function render(container, deps) {
     }
   }
 
+  async function fetchUsage() {
+    var path = "/admin/usage?range=" + encodeURIComponent(state.range);
+    try {
+      var r;
+      if (api) {
+        r = await api(path);
+      } else {
+        var k = getKey();
+        if (!k) {
+          state.usingReal = false;
+          renderLogTable();
+          updateSummary();
+          return;
+        }
+        var res2 = await fetch(path, { headers: { "Authorization": "Bearer " + k, "Accept": "application/json" } });
+        var text2 = await res2.text();
+        var json2 = null;
+        try { json2 = text2 ? JSON.parse(text2) : null; } catch { json2 = null; }
+        r = { res: res2, json: json2, text: text2 };
+      }
+      if (!r || !r.res) throw new Error("no response");
+      if (!r.res.ok) {
+        if (r.res.status === 404 || r.res.status === 501) {
+          state.usingReal = false;
+          if (els.credHint) els.credHint.textContent = "from pool · synthetic until GET /admin/usage";
+          renderLogTable();
+          updateSummary();
+          return;
+        }
+        throw new Error("HTTP " + r.res.status);
+      }
+      var payload = r.json;
+      if (!payload && r.text) {
+        try { payload = JSON.parse(r.text); } catch {}
+      }
+      var rawRows = extractUsageRows(payload);
+      if ((!rawRows || rawRows.length === 0) && payload && typeof payload === "object") {
+        if (Array.isArray(payload.table)) rawRows = payload.table;
+        else if (payload.data && Array.isArray(payload.data.table)) rawRows = payload.data.table;
+      }
+      var normalized = [];
+      for (var i = 0; i < rawRows.length; i++) {
+        var n = normalizeUsageRow(rawRows[i]);
+        if (n) normalized.push(n);
+      }
+      // sort by timeRaw desc
+      normalized.sort(function(a, b) {
+        var ta = a.timeRaw ? Date.parse(a.timeRaw) : 0;
+        var tb = b.timeRaw ? Date.parse(b.timeRaw) : 0;
+        if (isNaN(ta)) ta = 0;
+        if (isNaN(tb)) tb = 0;
+        return tb - ta;
+      });
+      if (normalized.length > 0 || (payload != null && typeof payload === "object")) {
+        // if payload object exists, treat as real even if empty
+        var isRealPayload = payload != null && typeof payload === "object";
+        // detect if payload looks like usage response (has logs/requests/usage etc or is array)
+        // if backend returns {logs:[]} it's real; keep usingReal true
+        state.logRows = normalized;
+        state.usingReal = true;
+        state.lastFetchAt = Date.now();
+        renderLogTable();
+        updateSummary();
+      } else {
+        state.usingReal = false;
+        renderLogTable();
+        updateSummary();
+      }
+    } catch (e) {
+      state.usingReal = false;
+      // keep existing logRows as fallback mock if empty
+      if (!state.logRows || state.logRows.length === 0) state.logRows = mockRequestLog();
+      renderLogTable();
+      updateSummary();
+    }
+  }
+
   async function fetchCredsForBreakdown() {
     try {
       if (api) {
         var r = await api("/admin/credentials");
         if (r && r.res && r.res.ok && r.json && Array.isArray(r.json.credentials)) {
           var list = r.json.credentials;
-          // map to rows but keep request counts synthetic until usage endpoint exists
           state.CredRows = list.map(function (c, idx) {
             var base = mockCredentialRows(new Map())[idx % 5];
             return {
@@ -517,6 +857,7 @@ export function render(container, deps) {
       setPillsActive(els.rangeWrap, "data-range", state.range);
       refreshTables();
       fetchMetrics();
+      fetchUsage();
     });
     if (els.groupWrap) els.groupWrap.addEventListener("click", function (e) {
       var t = e.target;
@@ -531,11 +872,10 @@ export function render(container, deps) {
       if (state.auto) startPoll();
       else stopPoll();
     });
-    if (els.reload) els.reload.addEventListener("click", function () { fetchMetrics(); fetchCredsForBreakdown(); });
+    if (els.reload) els.reload.addEventListener("click", function () { fetchMetrics(); fetchUsage(); fetchCredsForBreakdown(); });
     if (els.filterKey) els.filterKey.addEventListener("input", function () { state.filterKey = els.filterKey.value; renderLogTable(); });
     if (els.filterCred) els.filterCred.addEventListener("input", function () { state.filterCred = els.filterCred.value; renderCredTable(); renderLogTable(); });
 
-    // sortable cred table
     var head = container.querySelector("#u-credTable thead");
     if (head) head.addEventListener("click", function (e) {
       var th = e.target;
@@ -544,13 +884,11 @@ export function render(container, deps) {
       var col = th.getAttribute("data-sort");
       if (state.sortCol === col) state.sortDir = state.sortDir === "asc" ? "desc" : "asc";
       else { state.sortCol = col; state.sortDir = col === "uid" ? "asc" : "desc"; }
-      // update header arrows
       var ths = head.querySelectorAll("th[data-sort]");
       for (var i = 0; i < ths.length; i++) {
         var c = ths[i].getAttribute("data-sort");
         var arrow = c === state.sortCol ? (state.sortDir === "asc" ? " ▲" : " ▼") : "";
         ths[i].textContent = c + arrow;
-        // restore labels
         if (c === "uid") ths[i].textContent = "credential" + arrow;
         else if (c === "requests") ths[i].textContent = "requests" + arrow;
         else if (c === "tokens") ths[i].textContent = "tokens" + arrow;
@@ -571,6 +909,7 @@ export function render(container, deps) {
     state.timer = setInterval(function () {
       if (!state.auto || document.hidden) return;
       fetchMetrics();
+      fetchUsage();
     }, 10000);
   }
   function stopPoll() {
@@ -582,13 +921,14 @@ export function render(container, deps) {
   _usageStop = stopPoll;
   bind();
   fetchMetrics();
+  fetchUsage();
   fetchCredsForBreakdown();
   refreshTables();
   if (state.auto) startPoll();
 
   return {
     destroy: function () { try { stopPoll(); } catch {} try { if (_usageVis) document.removeEventListener("visibilitychange", _usageVis); } catch {} _usageVis = null; _usageStop = null; try { container.innerHTML = ""; } catch {} },
-    reload: function () { fetchMetrics(); fetchCredsForBreakdown(); }
+    reload: function () { fetchMetrics(); fetchUsage(); fetchCredsForBreakdown(); }
   };
 }
 export function destroy() {

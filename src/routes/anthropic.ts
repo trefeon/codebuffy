@@ -16,6 +16,7 @@ import {
   anthropicSSEFromUpstream,
 } from "../adapters/anthropic/emitter";
 import { randomBytes } from "node:crypto";
+import { pushFromUpstreamChunk } from "../observability/usage";
 
 function generateId(prefix = "msg"): string {
   const sep = prefix.endsWith("_") || prefix.endsWith("-") ? "" : "_";
@@ -143,10 +144,27 @@ export function mountAnthropicRoutes(app: Hono, deps: AnthropicDeps): void {
 
     if (isStream) {
       return streamSSE(c, async (stream) => {
+        let lastId: string | undefined;
+        let lastUsage: unknown;
+        const wrapped = (async function* () {
+          for await (const chunk of chunks) {
+            if (typeof chunk.id === "string" && chunk.id.length > 0) lastId = chunk.id;
+            if (chunk.usage !== undefined) lastUsage = chunk.usage;
+            yield chunk;
+          }
+        })();
         try {
           const id = generateId("msg");
-          for await (const frame of anthropicSSEFromUpstream(chunks, { id, model: ir.model })) {
+          for await (const frame of anthropicSSEFromUpstream(wrapped, { id, model: ir.model })) {
             await stream.write(frame);
+          }
+          if (lastId || lastUsage !== undefined) {
+            try {
+              pushFromUpstreamChunk({ id: lastId, model: ir.model, usage: lastUsage });
+              logger.info({ id: lastId, model: ir.model }, "usage recorded");
+            } catch (e) {
+              logger.warn({ err: e }, "usage push failed");
+            }
           }
         } catch (err) {
           if (err instanceof UpstreamError) {
@@ -167,20 +185,39 @@ export function mountAnthropicRoutes(app: Hono, deps: AnthropicDeps): void {
       try {
         const id = generateId("msg");
         const created = Math.floor(Date.now() / 1000);
-        const aggregated = await aggregateStream(chunks, { id, model: ir.model, created });
-        const choice = (aggregated as { choices?: Array<{ message?: { content?: string; tool_calls?: unknown }; finish_reason?: string | null }> }).choices?.[0];
+        let lastId: string | undefined;
+        let lastUsage: unknown;
+        const wrapped = (async function* () {
+          for await (const chunk of chunks) {
+            if (typeof chunk.id === "string" && chunk.id.length > 0) lastId = chunk.id;
+            if (chunk.usage !== undefined) lastUsage = chunk.usage;
+            yield chunk;
+          }
+        })();
+        const aggregated = await aggregateStream(wrapped, { id, model: ir.model, created });
+        const aggRecord = aggregated as Record<string, unknown>;
+        const aggUsage = (aggRecord.usage as unknown) ?? lastUsage;
+        const aggId = lastId ?? (typeof aggRecord.id === "string" ? (aggRecord.id as string) : undefined);
+        try {
+          pushFromUpstreamChunk({ id: aggId, model: ir.model, usage: aggUsage });
+          logger.info({ id: aggId, model: ir.model }, "usage recorded");
+        } catch (e) {
+          logger.warn({ err: e }, "usage push failed");
+        }
+        const aggChoices = aggRecord.choices as Array<{ message?: { content?: string; tool_calls?: unknown }; finish_reason?: string | null }> | undefined;
+        const choice = aggChoices?.[0];
         const content: string =
           (choice?.message?.content as string | undefined) ??
-          (aggregated as { content?: string }).content ??
+          (typeof aggRecord.content === "string" ? (aggRecord.content as string) : "") ??
           "";
         const tool_calls = (choice?.message?.tool_calls as
           | Array<{ id: string; type: "function"; function: { name: string; arguments: string } }>
-          | undefined) ?? (aggregated as { tool_calls?: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }> }).tool_calls;
+          | undefined) ?? (aggRecord.tool_calls as Array<{ id: string; type: "function"; function: { name: string; arguments: string } }> | undefined);
         const finish_reason: string | null =
           (choice?.finish_reason as string | null | undefined) ??
-          (aggregated as { finish_reason?: string | null }).finish_reason ??
+          (typeof aggRecord.finish_reason === "string" ? (aggRecord.finish_reason as string) : null) ??
           null;
-        const usage = (aggregated as { usage?: unknown }).usage;
+        const usage = aggUsage;
         const body = buildAnthropicResponse(
           { content, tool_calls, finish_reason, usage },
           { id, model: ir.model },
