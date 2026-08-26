@@ -4,7 +4,7 @@
 // Pattern follows badlogic/pi-mono scripts/generate-models.ts (build-time snapshot,
 // narrow corrections over upstream metadata). Re-run whenever catalogs change:
 //   bun scripts/generate-model-catalog.mjs
-import { writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
 // ---- CodeBuddy availability lists ----------------------------------------
@@ -131,6 +131,16 @@ async function main() {
   };
 
   const dest = resolve(process.cwd(), "src/models/catalog.generated.json");
+  // Idempotent: skip the write when only the generated timestamp would change.
+  try {
+    const prev = JSON.parse(readFileSync(dest, "utf8"));
+    if (JSON.stringify(prev.models) === JSON.stringify(out.models)) {
+      console.log(`unchanged: ${dest} (${out.models.length} models)`);
+      return;
+    }
+  } catch {
+    // first run or unreadable — fall through to write
+  }
   mkdirSync(dirname(dest), { recursive: true });
   writeFileSync(dest, JSON.stringify(out, null, 2) + "\n");
   const okSpec = out.models.filter((m) => m.spec).length;
