@@ -11,6 +11,7 @@ import { toUpstreamRequest } from "../ir/types";
 import { randomBytes } from "node:crypto";
 import { pushFromUpstreamChunk } from "../observability/usage";
 import { catalogForSite, siteForBase, specForId, type Site } from "../models/catalog";
+import { resolveModelId, ensureLeadingSystem } from "../models/aliases";
 
 function generateId(prefix = "chatcmpl"): string {
   return `${prefix}-${randomBytes(12).toString("hex")}`;
@@ -100,8 +101,8 @@ export function mountOpenAIRoutes(app: Hono, deps: OpenAIDeps): void {
       }
       throw e;
     }
-
     const isStream = ir.stream === true;
+    ir = ensureLeadingSystem({ ...ir, model: resolveModelId(ir.model) });
 
     const cred = await pool.pick();
     if (!cred) {

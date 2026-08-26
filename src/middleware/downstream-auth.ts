@@ -16,27 +16,22 @@ export function downstreamAuth(config: Config) {
       return;
     }
 
-    const header = c.req.header("authorization") ?? c.req.header("Authorization") ?? "";
-    if (!header.startsWith("Bearer ")) {
-      return c.json(
-        {
-          error: {
-            message: "Missing API key — expected Authorization: Bearer <key>",
-            type: "invalid_request_error",
-            param: null,
-            code: "invalid_api_key",
-          },
-        },
-        401,
-      );
+    // Accept both OpenAI-style `Authorization: Bearer <key>` and
+    // Anthropic-style `x-api-key: <key>` (Claude Code sends the latter).
+    const bearer = c.req.header("authorization") ?? "";
+    const xKey = c.req.header("x-api-key") ?? "";
+    let token = "";
+    if (bearer.startsWith("Bearer ")) {
+      token = bearer.slice(7).trim();
+    } else if (xKey.trim()) {
+      token = xKey.trim();
     }
 
-    const token = header.slice(7).trim();
     if (!token) {
       return c.json(
         {
           error: {
-            message: "Missing API key — expected Authorization: Bearer <key>",
+            message: "Missing API key — expected Authorization: Bearer <key> or x-api-key header",
             type: "invalid_request_error",
             param: null,
             code: "invalid_api_key",
