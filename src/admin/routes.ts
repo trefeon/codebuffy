@@ -5,6 +5,7 @@ import type { CredentialStore } from "../credentials/store";
 import type { Credential } from "../credentials/types";
 import { passkeyNotImplemented } from "./auth";
 import { listUsage } from "../observability/usage";
+import { fetchUsageQuota, QuotaError } from "../upstream/usage-quota";
 
 export interface CheckinSchedulerLike {
   trigger(uid: string): Promise<unknown>;
@@ -144,8 +145,31 @@ export function mountAdminRoutes(app: Hono, deps: MountAdminDeps): void {
   // Query: ?range=today|7d|30d|1h|6h|24h|yesterday|all  (default all)
   // Auth is via adminAuth middleware mounted in src/app.ts (timingSafeEqual); this handler assumes it.
   app.get("/admin/usage", (c) => {
-    const range = c.req.query("range") ?? c.req.query("days") ?? undefined;
+    const range = c.req.query("range") ?? "all";
     const data = listUsage(range);
     return c.json({ data });
+  });
+
+  // GET /admin/usage/quota — billing packages (refill + bonus packs) for one
+  // credential. ?uid=<uid> optional; defaults to the first stored credential.
+  app.get("/admin/usage/quota", async (c) => {
+    if (!store) return c.json({ error: { code: "UNAVAILABLE", message: "store not configured" } }, 503);
+    const uid = c.req.query("uid") ?? store.list()[0]?.uid;
+    const cred = uid ? store.get(uid) : null;
+    if (!cred) return c.json({ error: { code: "NOT_FOUND", message: "no credential available" } }, 404);
+    try {
+      const quota = await fetchUsageQuota(cred, {
+        apiBase: deps.config.apiBase,
+        logger,
+      });
+      return c.json({ uid: cred.uid, ...quota });
+    } catch (err) {
+      if (err instanceof QuotaError) {
+        const status = err.status >= 400 && err.status < 500 ? (err.status as 401 | 403 | 404) : (502 as const);
+        return c.json({ error: { code: "QUOTA_FAILED", message: err.message } }, status);
+      }
+      logger.error({ err: String(err), uid: cred.uid }, "quota fetch failed");
+      return c.json({ error: { code: "UPSTREAM_ERROR", message: "failed to fetch quota" } }, 502);
+    }
   });
 }

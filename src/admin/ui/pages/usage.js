@@ -377,6 +377,11 @@ export function render(container, deps) {
     + '    <label class="chip" style="gap:6px"><input type="checkbox" id="u-auto" checked> Auto-refresh 10s</label>'
     + '  </div>'
     + '  <div class="card-bd" style="display:grid; gap:12px">'
+    + '    <div class="card" style="box-shadow:none; border:1px dashed var(--border,#e5e7eb)">'
+    + '      <div class="card-hd" style="gap:8px"><div><h3 style="font-size:15px">Quota / Packages</h3><p>GET /admin/usage/quota · refill resets · bonus packs expire</p></div>'
+    + '      <button class="btn small ghost" id="u-quota-reload" type="button">Reload</button></div>'
+    + '      <div class="card-bd" id="u-quota" style="display:grid; gap:8px"><span class="hint">—</span></div>'
+    + '    </div>'
     + '    <div class="row" style="gap:8px; flex-wrap:wrap">'
     + '      <span class="row" id="u-group" style="gap:6px"><button class="pill is-active" data-group="model" type="button">model</button><button class="pill" data-group="credential" type="button">credential</button><button class="pill" data-group="apiKey" type="button">apiKey</button><button class="pill" data-group="route" type="button">route</button></span>'
     + '      <span class="hint" id="u-updated" style="margin-left:auto">—</span>'
@@ -733,6 +738,45 @@ export function render(container, deps) {
     }
   }
 
+  async function fetchQuota() {
+    var box = container.querySelector("#u-quota");
+    if (!box) return;
+    var reloadBtn = container.querySelector("#u-quota-reload");
+    if (reloadBtn) reloadBtn.disabled = true;
+    try {
+      var r;
+      if (api) {
+        r = await api("/admin/usage/quota");
+      } else {
+        var k = getKey();
+        var res2 = await fetch("/admin/usage/quota", { headers: { "Authorization": "Bearer " + (k || ""), "Accept": "application/json" } });
+        var t2 = await res2.text();
+        var j2 = null; try { j2 = t2 ? JSON.parse(t2) : null; } catch { j2 = null; }
+        r = { res: res2, json: j2 };
+      }
+      var d = r && r.json ? r.json : r;
+      var rows = d && d.quotas ? d.quotas : [];
+      if (!rows.length) { box.innerHTML = '<span class="hint">no credit packages found</span>'; return; }
+      var h = "";
+      for (var i = 0; i < rows.length; i++) {
+        var q = rows[i];
+        var pct = q.total > 0 ? Math.min(100, Math.round((q.used / q.total) * 100)) : 0;
+        var reset = q.resetAt ? new Date(q.resetAt).toLocaleString() : "—";
+        h += '<div style="display:grid; gap:3px">'
+          + '<div class="row" style="gap:8px; flex-wrap:wrap"><strong>' + esc(q.name) + '</strong>'
+          + '<span class="hint">' + (q.recurring ? "resets" : "expires") + " " + reset + '</span>'
+          + '<span class="hint" style="margin-left:auto">' + q.used + " / " + q.total + " (" + pct + '%)</span></div>'
+          + '<div style="height:6px; background:var(--border,#e5e7eb); border-radius:3px"><div style="height:6px; width:' + pct + '%; background:var(--accent,#4f46e5); border-radius:3px"></div></div>'
+          + "</div>";
+      }
+      box.innerHTML = h;
+    } catch (e) {
+      box.innerHTML = '<span class="hint">quota unavailable — ' + esc(String((e && e.message) || e)) + "</span>";
+    } finally {
+      if (reloadBtn) reloadBtn.disabled = false;
+    }
+  }
+
   async function fetchUsage() {
     var path = "/admin/usage?range=" + encodeURIComponent(state.range);
     try {
@@ -834,7 +878,6 @@ export function render(container, deps) {
         var k = getKey();
         if (!k) return;
         var rr = await fetch("/admin/credentials", { headers: { "Authorization": "Bearer " + k } });
-        if (!rr.ok) return;
         var jj = await rr.json();
         if (jj && Array.isArray(jj.credentials) && jj.credentials.length) {
           state.CredRows = jj.credentials.map(function (c, idx2) {
@@ -872,7 +915,9 @@ export function render(container, deps) {
       if (state.auto) startPoll();
       else stopPoll();
     });
-    if (els.reload) els.reload.addEventListener("click", function () { fetchMetrics(); fetchUsage(); fetchCredsForBreakdown(); });
+    if (els.reload) els.reload.addEventListener("click", function () { fetchMetrics(); fetchUsage(); fetchCredsForBreakdown(); fetchQuota(); });
+    var qbtn = container.querySelector("#u-quota-reload");
+    if (qbtn) qbtn.addEventListener("click", fetchQuota);
     if (els.filterKey) els.filterKey.addEventListener("input", function () { state.filterKey = els.filterKey.value; renderLogTable(); });
     if (els.filterCred) els.filterCred.addEventListener("input", function () { state.filterCred = els.filterCred.value; renderCredTable(); renderLogTable(); });
 
@@ -923,12 +968,12 @@ export function render(container, deps) {
   fetchMetrics();
   fetchUsage();
   fetchCredsForBreakdown();
+  fetchQuota();
   refreshTables();
   if (state.auto) startPoll();
-
   return {
     destroy: function () { try { stopPoll(); } catch {} try { if (_usageVis) document.removeEventListener("visibilitychange", _usageVis); } catch {} _usageVis = null; _usageStop = null; try { container.innerHTML = ""; } catch {} },
-    reload: function () { fetchMetrics(); fetchUsage(); fetchCredsForBreakdown(); }
+    reload: function () { fetchMetrics(); fetchUsage(); fetchCredsForBreakdown(); fetchQuota(); }
   };
 }
 export function destroy() {
