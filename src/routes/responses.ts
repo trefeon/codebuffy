@@ -5,6 +5,7 @@ import type { Config } from "../config";
 import type { Logger } from "../logger";
 import type { Pool } from "../pool/types";
 import type { UpstreamClient } from "../upstream/client";
+import type { Credential } from "../credentials/types";
 import { UpstreamError } from "../upstream/errors";
 import { parseResponsesRequest } from "../adapters/responses/parser";
 import { ParseError } from "../ir/types";
@@ -60,6 +61,8 @@ export interface ResponsesDeps {
   logger: Logger;
   pool: Pool;
   upstream: UpstreamClient;
+  /** Live-token recovery — forced refresh on inference-time 401/403 (one shot). */
+  refresh?: { refreshNow(uid: string): Promise<Credential> };
 }
 
 export function mountResponsesRoutes(app: Hono, deps: ResponsesDeps): void {
@@ -126,51 +129,81 @@ export function mountResponsesRoutes(app: Hono, deps: ResponsesDeps): void {
       chunks = upstream.streamChat(upstreamReq, cred, signal);
     } catch (err) {
       if (err instanceof UpstreamError) {
+        pool.reportFailure?.(cred.uid, err.code);
         const mapped = mapUpstreamErrorToHttp(err);
         return c.json(mapped.body, mapped.status as never);
       }
       throw err;
     }
 
+    let activeCred: Credential = cred;
+    let retriedAuth = false;
+
+    // One-shot live-token recovery: a 401/403 surfacing before any byte was
+    // sent means the cached AT died early (revoked / clock skew past the
+    // isExpiring lead). Force one refresh + rebuild; never restart mid-stream.
+    const retryWithFreshToken = async (err: UpstreamError): Promise<boolean> => {
+      if (retriedAuth || !deps.refresh) return false;
+      if (err.code !== 401 && err.code !== 403) return false;
+      retriedAuth = true;
+      try {
+        activeCred = await deps.refresh.refreshNow(activeCred.uid);
+      } catch (refreshErr) {
+        logger.warn({ err: refreshErr, uid: activeCred.uid }, "live auth refresh failed; keeping original error");
+        return false;
+      }
+      chunks = upstream.streamChat(upstreamReq, activeCred, signal);
+      return true;
+    };
+
     if (isStream) {
       return streamSSE(c, async (stream) => {
         let lastId: string | undefined;
         let lastUsage: unknown;
-        const wrapped = (async function* () {
-          for await (const chunk of chunks) {
-            if (typeof chunk.id === "string" && chunk.id.length > 0) lastId = chunk.id;
-            if (chunk.usage !== undefined) lastUsage = chunk.usage;
-            yield chunk;
-          }
-        })();
-        try {
-          const id = generateId("resp");
-          const created = Math.floor(Date.now() / 1000);
-          for await (const frame of responsesSSEFromUpstream(wrapped, { id, model: projected.model, created })) {
-            await stream.write(frame);
-          }
-          if (lastId || lastUsage !== undefined) {
-            try {
-              pushFromUpstreamChunk({ id: lastId, model: projected.model, usage: lastUsage });
-              logger.info({ id: lastId, model: projected.model }, "usage recorded");
-            } catch (e) {
-              logger.warn({ err: e }, "usage push failed");
+        let emitted = false;
+        for (;;) {
+          const wrapped = (async function* () {
+            for await (const chunk of chunks) {
+              if (typeof chunk.id === "string" && chunk.id.length > 0) lastId = chunk.id;
+              if (chunk.usage !== undefined) lastUsage = chunk.usage;
+              yield chunk;
             }
-          }
-        } catch (err) {
-          if (err instanceof UpstreamError) {
-            const mapped = mapUpstreamErrorToHttp(err);
-            await stream.write(formatResponsesSSE({ type: "error", error: mapped.body }));
-          } else {
-            logger.error({ err }, "stream responses failed");
-            await stream.write(formatResponsesSSE({ type: "error", error: { message: "upstream stream failed", type: "api_error" } }));
+          })();
+          try {
+            const id = generateId("resp");
+            const created = Math.floor(Date.now() / 1000);
+            for await (const frame of responsesSSEFromUpstream(wrapped, { id, model: projected.model, created })) {
+              emitted = true;
+              await stream.write(frame);
+            }
+            if (lastId || lastUsage !== undefined) {
+              try {
+                pushFromUpstreamChunk({ id: lastId, model: projected.model, usage: lastUsage });
+                logger.info({ id: lastId, model: projected.model }, "usage recorded");
+              } catch (e) {
+                logger.warn({ err: e }, "usage push failed");
+              }
+            }
+            pool.reportSuccess?.(activeCred.uid);
+            break;
+          } catch (err) {
+            if (err instanceof UpstreamError) {
+              pool.reportFailure?.(activeCred.uid, err.code);
+              if (!emitted && (await retryWithFreshToken(err))) continue;
+              const mapped = mapUpstreamErrorToHttp(err);
+              await stream.write(formatResponsesSSE({ type: "error", error: mapped.body }));
+            } else {
+              logger.error({ err }, "stream responses failed");
+              await stream.write(formatResponsesSSE({ type: "error", error: { message: "upstream stream failed", type: "api_error" } }));
+            }
+            break;
           }
         }
       });
     } else {
-      try {
-        const id = generateId("resp");
-        const created = Math.floor(Date.now() / 1000);
+      const id = generateId("resp");
+      const created = Math.floor(Date.now() / 1000);
+      for (;;) {
         let lastId: string | undefined;
         let lastUsage: unknown;
         const wrapped = (async function* () {
@@ -180,39 +213,44 @@ export function mountResponsesRoutes(app: Hono, deps: ResponsesDeps): void {
             yield chunk;
           }
         })();
-        const aggregated = await aggregateStream(wrapped, { id, model: projected.model, created });
-        const aggRecord = aggregated as Record<string, unknown>;
-        const aggUsage = (aggRecord.usage as unknown) ?? lastUsage;
-        const aggId = lastId ?? (typeof aggRecord.id === "string" ? (aggRecord.id as string) : undefined);
         try {
-          pushFromUpstreamChunk({ id: aggId, model: projected.model, usage: aggUsage });
-          logger.info({ id: aggId, model: projected.model }, "usage recorded");
-        } catch (e) {
-          logger.warn({ err: e }, "usage push failed");
+          const aggregated = await aggregateStream(wrapped, { id, model: projected.model, created });
+          pool.reportSuccess?.(activeCred.uid);
+          const aggRecord = aggregated as Record<string, unknown>;
+          const aggUsage = (aggRecord.usage as unknown) ?? lastUsage;
+          const aggId = lastId ?? (typeof aggRecord.id === "string" ? (aggRecord.id as string) : undefined);
+          try {
+            pushFromUpstreamChunk({ id: aggId, model: projected.model, usage: aggUsage });
+            logger.info({ id: aggId, model: projected.model }, "usage recorded");
+          } catch (e) {
+            logger.warn({ err: e }, "usage push failed");
+          }
+          const aggChoices = aggRecord.choices as Array<{ message?: { content?: string; tool_calls?: unknown }; finish_reason?: string | null }> | undefined;
+          const choice = aggChoices?.[0];
+          const content: string =
+            (choice?.message?.content as string | undefined) ??
+            (typeof aggRecord.content === "string" ? (aggRecord.content as string) : "") ??
+            "";
+          const tool_calls = (choice?.message?.tool_calls as
+            | Array<{ id: string; type: "function"; function: { name: string; arguments: string } }>
+            | undefined) ?? (aggRecord.tool_calls as Array<{ id: string; type: "function"; function: { name: string; arguments: string } }> | undefined);
+          const finish_reason: string | null =
+            (choice?.finish_reason as string | null | undefined) ??
+            (typeof aggRecord.finish_reason === "string" ? (aggRecord.finish_reason as string) : null) ??
+            null;
+          const usage = aggUsage;
+          const body = buildResponsesResponse({ content, tool_calls, finish_reason, usage }, { id, model: projected.model, created });
+          return c.json(body);
+        } catch (err) {
+          if (err instanceof UpstreamError) {
+            pool.reportFailure?.(activeCred.uid, err.code);
+            if (await retryWithFreshToken(err)) continue;
+            const mapped = mapUpstreamErrorToHttp(err);
+            return c.json(mapped.body, mapped.status as never);
+          }
+          logger.error({ err }, "responses failed");
+          return c.json({ error: { message: "upstream request failed", type: "api_error" } }, 502);
         }
-        const aggChoices = aggRecord.choices as Array<{ message?: { content?: string; tool_calls?: unknown }; finish_reason?: string | null }> | undefined;
-        const choice = aggChoices?.[0];
-        const content: string =
-          (choice?.message?.content as string | undefined) ??
-          (typeof aggRecord.content === "string" ? (aggRecord.content as string) : "") ??
-          "";
-        const tool_calls = (choice?.message?.tool_calls as
-          | Array<{ id: string; type: "function"; function: { name: string; arguments: string } }>
-          | undefined) ?? (aggRecord.tool_calls as Array<{ id: string; type: "function"; function: { name: string; arguments: string } }> | undefined);
-        const finish_reason: string | null =
-          (choice?.finish_reason as string | null | undefined) ??
-          (typeof aggRecord.finish_reason === "string" ? (aggRecord.finish_reason as string) : null) ??
-          null;
-        const usage = aggUsage;
-        const body = buildResponsesResponse({ content, tool_calls, finish_reason, usage }, { id, model: projected.model, created });
-        return c.json(body);
-      } catch (err) {
-        if (err instanceof UpstreamError) {
-          const mapped = mapUpstreamErrorToHttp(err);
-          return c.json(mapped.body, mapped.status as never);
-        }
-        logger.error({ err }, "responses failed");
-        return c.json({ error: { message: "upstream request failed", type: "api_error" } }, 502);
       }
     }
   });

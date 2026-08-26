@@ -97,6 +97,7 @@ const app = createApp({
   startedAt: Date.now(),
   pool,
   upstream,
+  refresh: refreshService,
   store,
   checkinScheduler,
 });

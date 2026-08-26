@@ -5,6 +5,7 @@ import type { Pool } from "./pool/types";
 import type { CredentialState } from "./pool/state";
 import type { UpstreamClient } from "./upstream/client";
 import type { CredentialStore } from "./credentials/store";
+import type { Credential } from "./credentials/types";
 import { downstreamAuth } from "./middleware/downstream-auth";
 import { adminAuth } from "./middleware/admin-auth";
 import { metricsMiddleware } from "./observability/middleware";
@@ -22,6 +23,8 @@ export interface AppDeps {
   startedAt: number;
   pool?: Pool & { getStats?: () => Record<CredentialState, number> };
   upstream?: UpstreamClient;
+  /** Forced token refresh for live 401/403 recovery (RefreshService in prod). */
+  refresh?: { refreshNow(uid: string): Promise<Credential> };
   store?: CredentialStore & {
     isEncrypted?: () => boolean;
     listExpiringSoon?: (skewMs?: number) => unknown[];
@@ -159,18 +162,21 @@ export function createApp(deps: AppDeps): Hono {
       logger: deps.logger,
       pool: deps.pool,
       upstream: deps.upstream,
+      refresh: deps.refresh,
     });
     mountAnthropicRoutes(app, {
       config: deps.config,
       logger: deps.logger,
       pool: deps.pool,
       upstream: deps.upstream,
+      refresh: deps.refresh,
     });
     mountResponsesRoutes(app, {
       config: deps.config,
       logger: deps.logger,
       pool: deps.pool,
       upstream: deps.upstream,
+      refresh: deps.refresh,
     });
   }
 
