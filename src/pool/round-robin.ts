@@ -186,6 +186,21 @@ export class RoundRobinPool implements Pool {
     return this.stateMachine.getState(uid);
   }
 
+  /**
+   * Route seam — feed inference-time outcomes into the same state machine and
+   * breaker that pick() uses, so a credential failing mid-traffic (banned,
+   * quota, auth) leaves rotation immediately instead of staying Active.
+   */
+  reportSuccess(uid: string): void {
+    this.stateMachine.recordSuccess(uid);
+    this.breaker.recordSuccess(uid);
+  }
+
+  reportFailure(uid: string, code: number | string): void {
+    this.stateMachine.recordFailure(uid, code);
+    this.breaker.recordFailure(uid);
+  }
+
   getStats(): Record<CredentialState, number> {
     const counts: Record<CredentialState, number> = {
       [CredentialState.Active]: 0,
