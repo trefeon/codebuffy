@@ -142,14 +142,19 @@ export function render(container, deps) {
       <div class="modal-hd" style="padding:16px; border-bottom:1px solid var(--border, #e5e7eb); display:flex; justify-content:space-between; align-items:center"><strong>Add account</strong><button class="icon-btn" type="button" data-close="dlg-add" aria-label="Close"><svg aria-hidden="true" width="16" height="16"><use href="#i-close"></use></svg></button></div>
       <div class="modal-bd" style="padding:16px; display:grid; gap:12px">
         <div class="hint">No raw paste endpoint until encrypted-store lands. Use the onboarding script below — it writes one pool file per account via official flows.</div>
+        <div class="card" style="box-shadow:none; background:var(--paper, #f5f3ef); border:1px dashed var(--border, #e5e7eb); padding:10px 12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+          <span class="hint" style="font-weight:650">Site</span>
+          <button class="pill is-active" type="button" data-cred-site="cn">CN · copilot.tencent.com</button>
+          <button class="pill" type="button" data-cred-site="intl">Intl · www.codebuddy.ai</button>
+          <span class="hint" style="margin-left:auto">Indo → Intl</span>
+        </div>
         <div class="card" style="box-shadow:none; background:var(--paper, #f5f3ef)">
           <div class="card-bd" style="display:grid; gap:8px">
-            <div class="mono" style="font-size:12px; background:#0b1220; color:#e2e8f0; padding:10px; border-radius:8px; overflow:auto">
+            <div class="mono" id="cred-onboard-cmd" style="font-size:12px; background:#0b1220; color:#e2e8f0; padding:10px; border-radius:8px; overflow:auto">
 bun scripts/onboard-account.mjs --label "work-buddy-3" --provision-key --verify<br/>
 bun scripts/onboard-account.mjs --from-auth-file ~/Library/Application\\ Support/CodeBuddy/auth.json --label acc-1<br/>
 bun scripts/onboard-account.mjs --pool-file data/pool/a1b2.json --verify
             </div>
-            <div class="hint">Options: <code>--label</code> friendly name · <code>--provision-key</code> also create 365-day console key (ck_) · <code>--from-auth-file</code> import desktop app tokens · <code>--pool-file</code> operate on existing file · <code>--verify</code> probe GET /v3/config · <code>--api-base</code> / <code>--console-base</code> / <code>--out-dir</code> (default data/pool)</div>
             <div class="hint">Legal posture: human-per-account registration only; script automates only official device-flow / console validation / API-key management.</div>
           </div>
         </div>
@@ -252,8 +257,32 @@ bun scripts/onboard-account.mjs --pool-file data/pool/a1b2.json --verify
     openDlg(els.dlgBulk);
   });
   const copyOnboard = container.querySelector("#btn-copy-onboard");
+  let credSite = "cn";
+  function onboardCmdFor(site) {
+    if (site === "intl") {
+      return `bun scripts/onboard-account.mjs --label "work-buddy-3" --api-base https://www.codebuddy.ai --console-base https://www.codebuddy.ai --provision-key --verify`;
+    }
+    return `bun scripts/onboard-account.mjs --label "work-buddy-3" --provision-key --verify`;
+  }
+  function refreshCredSitePills() {
+    for (const b of container.querySelectorAll("[data-cred-site]")) b.classList.toggle("is-active", b.getAttribute("data-cred-site") === credSite);
+    const el = container.querySelector("#cred-onboard-cmd");
+    if (el) {
+      if (credSite === "intl") {
+        el.innerHTML = `bun scripts/onboard-account.mjs --label "work-buddy-3" --api-base https://www.codebuddy.ai --console-base https://www.codebuddy.ai --provision-key --verify<br/>bun scripts/onboard-account.mjs --from-auth-file ~/Library/Application\\ Support/CodeBuddy/auth.json --label acc-1 --api-base https://www.codebuddy.ai<br/>bun scripts/onboard-account.mjs --pool-file data/pool/a1b2.json --verify --api-base https://www.codebuddy.ai`;
+      } else {
+        el.innerHTML = `bun scripts/onboard-account.mjs --label "work-buddy-3" --provision-key --verify<br/>bun scripts/onboard-account.mjs --from-auth-file ~/Library/Application\\ Support/CodeBuddy/auth.json --label acc-1<br/>bun scripts/onboard-account.mjs --pool-file data/pool/a1b2.json --verify`;
+      }
+    }
+  }
+  container.addEventListener("click", (e) => {
+    const s = e.target.closest("[data-cred-site]");
+    if (!s) return;
+    credSite = s.getAttribute("data-cred-site") || "cn";
+    refreshCredSitePills();
+  });
   if (copyOnboard) copyOnboard.addEventListener("click", async () => {
-    const cmd = `bun scripts/onboard-account.mjs --label "work-buddy-3" --provision-key --verify`;
+    const cmd = onboardCmdFor(credSite);
     try {
       if (navigator.clipboard && navigator.clipboard.writeText) {
         await navigator.clipboard.writeText(cmd);
@@ -263,7 +292,6 @@ bun scripts/onboard-account.mjs --pool-file data/pool/a1b2.json --verify
       }
     } catch { toast(cmd, "ok"); }
   });
-  const btnEnvImport = container.querySelector("#btn-env-import");
   if (btnEnvImport) btnEnvImport.addEventListener("click", () => {
     toast("Env parsed (mock) — write pool files to data/pool/ and restart", "ok");
     closeDlg(els.dlgEnv);

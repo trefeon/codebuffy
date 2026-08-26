@@ -233,9 +233,18 @@ export function render(container, deps) {
         html += '<div class="hint">adminAuth order: CODEBUFFY_ADMIN_KEYS → CODEBUFFY_API_KEYS fallback → open mode · store.encrypted ● when CODEBUFFY_ENCRYPTION_KEY set · GET /readyz → store.encrypted</div>';
         html += '</div>';
       } else {
+        if (group === "Network") {
+          var isIntl = String(current.apiBase || "").indexOf("codebuddy.ai") !== -1;
+          var site = isIntl ? "intl" : "cn";
+          html += '<div class="card" style="box-shadow:none; background:var(--paper, #faf9f5); border:1px dashed var(--border, #e5e7eb); padding:10px 12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap">';
+          html += '<span class="hint" style="font-weight:650">Site</span>';
+          html += '<button class="pill ' + (site === "cn" ? "is-active" : "") + '" type="button" data-site="cn">CN · copilot.tencent.com</button>';
+          html += '<button class="pill ' + (site === "intl" ? "is-active" : "") + '" type="button" data-site="intl">Intl · www.codebuddy.ai</button>';
+          html += '<span class="hint" style="margin-left:auto">Indo → Intl · CN butuh nomor CN/HK</span>';
+          html += '</div>';
+        }
         // generic grid
         var cols = group === "System" || group === "Network" || group === "Pool" ? "three" : "two";
-        html += '<div class="' + cols + '" style="gap:12px">';
         for (var fi = 0; fi < fields.length; fi++) {
           var f = fields[fi];
           if (group === "Security" && f.type === "secret") continue;
@@ -528,6 +537,28 @@ export function render(container, deps) {
 
   // reveal/copy/set handlers
   container.addEventListener("click", function (e) {
+    var siteBtn = e.target.closest("[data-site]");
+    if (siteBtn) {
+      var site = siteBtn.getAttribute("data-site");
+      if (site === "intl") {
+        current.apiBase = "https://www.codebuddy.ai";
+        current.consoleBase = "https://www.codebuddy.ai";
+      } else {
+        current.apiBase = "https://copilot.tencent.com";
+        current.consoleBase = "https://www.codebuddy.cn";
+      }
+      refreshVisualInputs();
+      // toggle active pill
+      var pills = container.querySelectorAll("[data-site]");
+      for (var pi = 0; pi < pills.length; pi++) {
+        var p = pills[pi];
+        if (p.getAttribute("data-site") === site) p.classList.add("is-active");
+        else p.classList.remove("is-active");
+      }
+      syncYamlFromVisualIfNeeded();
+      toastSafe(site === "intl" ? "Site → Intl (www.codebuddy.ai) — Indo recommended" : "Site → CN (copilot.tencent.com)", "ok");
+      return;
+    }
     var rev = e.target.closest("[data-reveal]");
     if (rev) {
       var key = rev.getAttribute("data-reveal");
