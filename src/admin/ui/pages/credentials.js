@@ -96,6 +96,7 @@ export function render(container, deps) {
             <button class="btn small" type="button" id="btn-bulk">Bulk ▾</button>
             <button class="btn small" type="button" id="btn-env">Add env file</button>
             <button class="btn primary small" type="button" id="btn-add">+ Add account</button>
+            <button class="btn small" type="button" id="btn-device">Device login</button>
           </span>
         </div>
         <div class="row" style="justify-content:space-between">
@@ -163,6 +164,29 @@ bun scripts/onboard-account.mjs --pool-file data/pool/a1b2.json --verify
       <div class="modal-ft" style="padding:12px 16px; border-top:1px solid var(--border, #e5e7eb); display:flex; justify-content:flex-end; gap:8px; background:var(--paper, #f5f3ef)"><button class="btn ghost" type="button" data-close="dlg-add">Close</button><button class="btn primary" type="button" id="btn-copy-onboard">Copy command</button></div>
     </dialog>
 
+    <dialog id="dlg-device" aria-label="Device-flow login" style="border:none; padding:0; border-radius:14px; max-width:560px; width:calc(100% - 32px)">
+      <div class="modal-hd" style="padding:16px; border-bottom:1px solid var(--border, #e5e7eb); display:flex; justify-content:space-between; align-items:center"><strong>Device-flow login</strong><button class="icon-btn" type="button" data-close="dlg-device" aria-label="Close"><svg aria-hidden="true" width="16" height="16"><use href="#i-close"></use></svg></button></div>
+      <div class="modal-bd" style="padding:16px; display:grid; gap:12px">
+        <div class="hint">Headless login (9router wire spec): Start opens the CodeBuddy auth page — approve in your browser — then Poll until the token lands and the account joins the pool.</div>
+        <label class="hint">Domain
+          <select class="select" id="dev-domain" aria-label="Device-flow domain" style="max-width:280px">
+            <option value="cn">CN · copilot.tencent.com</option>
+            <option value="intl">Intl · www.codebuddy.ai</option>
+          </select>
+        </label>
+        <div class="row">
+          <button class="btn primary small" type="button" id="dev-start">Start</button>
+          <button class="btn small" type="button" id="dev-poll" disabled>Poll</button>
+        </div>
+        <div class="kv-mini" style="display:grid; grid-template-columns:80px 1fr; gap:4px 10px; font-size:12px">
+          <dt style="color:var(--muted, #6b7280)">state</dt><dd class="mono" id="dev-state" style="word-break:break-all">—</dd>
+          <dt style="color:var(--muted, #6b7280)">auth</dt><dd><a id="dev-authlink" href="#" target="_blank" rel="noopener noreferrer" hidden>open auth page</a></dd>
+          <dt style="color:var(--muted, #6b7280)">status</dt><dd id="dev-status">idle</dd>
+        </div>
+      </div>
+      <div class="modal-ft" style="padding:12px 16px; border-top:1px solid var(--border, #e5e7eb); display:flex; justify-content:flex-end; gap:8px; background:var(--paper, #f5f3ef)"><button class="btn ghost" type="button" data-close="dlg-device">Close</button></div>
+    </dialog>
+
     <dialog id="dlg-env" aria-label="Add environment file" style="border:none; padding:0; border-radius:14px; max-width:560px; width:calc(100% - 32px)">
       <div class="modal-hd" style="padding:16px; border-bottom:1px solid var(--border, #e5e7eb); display:flex; justify-content:space-between; align-items:center"><strong>Add environment file</strong><button class="icon-btn" type="button" data-close="dlg-env" aria-label="Close"><svg aria-hidden="true" width="16" height="16"><use href="#i-close"></use></svg></button></div>
       <div class="modal-bd" style="padding:16px; display:grid; gap:12px">
@@ -212,6 +236,7 @@ bun scripts/onboard-account.mjs --pool-file data/pool/a1b2.json --verify
     dlgEnv: container.querySelector("#dlg-env"),
     dlgBulk: container.querySelector("#dlg-bulk"),
     dlgDetail: container.querySelector("#dlg-detail"),
+    dlgDevice: container.querySelector("#dlg-device"),
     detailPre: container.querySelector("#detail-pre"),
     envExisting: container.querySelector("#env-existing"),
   };
@@ -292,6 +317,7 @@ bun scripts/onboard-account.mjs --pool-file data/pool/a1b2.json --verify
       }
     } catch { toast(cmd, "ok"); }
   });
+  const btnEnvImport = container.querySelector("#btn-env-import");
   if (btnEnvImport) btnEnvImport.addEventListener("click", () => {
     toast("Env parsed (mock) — write pool files to data/pool/ and restart", "ok");
     closeDlg(els.dlgEnv);
@@ -309,6 +335,96 @@ bun scripts/onboard-account.mjs --pool-file data/pool/a1b2.json --verify
       if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(text);
       toast("Copied JSON", "ok");
     } catch { toast("Copy failed", "error"); }
+  });
+
+  // device-flow login — POST /admin/credentials/device-flow/{start,poll}
+  const btnDevice = container.querySelector("#btn-device");
+  const devDomain = container.querySelector("#dev-domain");
+  const devStart = container.querySelector("#dev-start");
+  const devPoll = container.querySelector("#dev-poll");
+  const devState = container.querySelector("#dev-state");
+  const devAuthlink = container.querySelector("#dev-authlink");
+  const devStatus = container.querySelector("#dev-status");
+  let deviceFlowState = null;
+  if (btnDevice) btnDevice.addEventListener("click", () => openDlg(els.dlgDevice));
+  if (devStart) devStart.addEventListener("click", async () => {
+    const domain = devDomain ? devDomain.value : "cn";
+    devStart.disabled = true;
+    if (devStatus) devStatus.textContent = "requesting state…";
+    try {
+      if (!api) { toast("API not available", "error"); return; }
+      const r = await api("/admin/credentials/device-flow/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ domain }),
+      });
+      const u = unwrap(r);
+      if (!u.ok) {
+        const msg = (u.json && u.json.error && u.json.error.message) ? u.json.error.message : u.text || ("HTTP " + u.status);
+        if (devStatus) devStatus.textContent = "start failed";
+        toast(msg, "error");
+        return;
+      }
+      deviceFlowState = (u.json && u.json.state) || null;
+      const authUrl = (u.json && u.json.authUrl) || "";
+      if (deviceFlowState && devState) devState.textContent = deviceFlowState;
+      if (authUrl && devAuthlink) { devAuthlink.href = authUrl; devAuthlink.hidden = false; }
+      if (devPoll) devPoll.disabled = !deviceFlowState;
+      if (devStatus) devStatus.textContent = "waiting for browser approval…";
+      try { window.open(authUrl, "_blank", "noopener,noreferrer"); } catch {}
+      toast("Device login started — approve in the opened tab, then Poll", "ok");
+    } catch (err) {
+      const m = err && err.message ? err.message : String(err);
+      if (devStatus) devStatus.textContent = "start failed";
+      toast("Start failed: " + m, "error");
+    } finally {
+      devStart.disabled = false;
+    }
+  });
+  if (devPoll) devPoll.addEventListener("click", async () => {
+    if (!deviceFlowState) { toast("Press Start first", "error"); return; }
+    const domain = devDomain ? devDomain.value : "cn";
+    devPoll.disabled = true;
+    const orig = devPoll.textContent;
+    devPoll.textContent = "Polling…";
+    try {
+      if (!api) { toast("API not available", "error"); return; }
+      const r = await api("/admin/credentials/device-flow/poll", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ domain, state: deviceFlowState }),
+      });
+      const u = unwrap(r);
+      if (!u.ok && u.json && u.json.error && u.json.error.code === "DEVICE_FLOW_ERROR") {
+        if (devStatus) devStatus.textContent = "error — " + u.json.error.message;
+        toast(u.json.error.message, "error");
+        return;
+      }
+      if (!u.ok) {
+        const msg = (u.json && u.json.error && u.json.error.message) ? u.json.error.message : u.text || ("HTTP " + u.status);
+        if (devStatus) devStatus.textContent = "poll failed";
+        toast(msg, "error");
+        return;
+      }
+      if (u.json && u.json.status === "pending") {
+        if (devStatus) devStatus.textContent = "pending… keep waiting";
+        return;
+      }
+      if (u.json && u.json.status === "success") {
+        const uid = (u.json.credential && u.json.credential.uid) || "?";
+        if (devStatus) devStatus.textContent = "success — stored as " + uid;
+        toast("Account added to pool: " + uid, "ok");
+        await loadCreds();
+        await loadPool();
+      }
+    } catch (err) {
+      const m = err && err.message ? err.message : String(err);
+      if (devStatus) devStatus.textContent = "poll failed";
+      toast("Poll failed: " + m, "error");
+    } finally {
+      if (orig != null) devPoll.textContent = orig;
+      if (deviceFlowState) devPoll.disabled = !!(devStatus && /success/.test(devStatus.textContent || ""));
+    }
   });
 
   // filters
