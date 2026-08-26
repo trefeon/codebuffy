@@ -125,7 +125,54 @@ class SignalCapturingUpstream extends UpstreamClient {
   }
 }
 
-function buildApp(opts: { downstreamKeys?: string[]; pool?: Pool; upstream?: UpstreamClient } = {}) {
+/** Fails the first streamChat attempt with `err`, then serves `chunks`. */
+class AuthRetryUpstream extends UpstreamClient {
+  calls = 0;
+  readonly credsSeen: Credential[] = [];
+  constructor(
+    private err: UpstreamError,
+    private chunks: UpstreamChunk[] = [
+      { id: "chatcmpl-1", choices: [{ delta: { content: "Hello" }, finish_reason: null, index: 0 }] },
+      { id: "chatcmpl-1", choices: [{ delta: { content: " world" }, finish_reason: "stop", index: 0 }], usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 } },
+    ],
+  ) {
+    super(loadConfig({}, () => null) as never, createLogger(loadConfig({}, () => null) as never) as never);
+  }
+  override async *streamChat(_req: UpstreamChatRequest, cred: Credential): AsyncIterable<UpstreamChunk> {
+    this.calls++;
+    this.credsSeen.push(cred);
+    if (this.calls === 1) throw this.err;
+    for (const c of this.chunks) yield c;
+  }
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  override async fetchModels(_cred: Credential): Promise<unknown> {
+    return [];
+  }
+}
+
+interface SpyPool extends Pool {
+  successes: string[];
+  failures: Array<[string, number | string]>;
+}
+
+function makeSpyPool(cred: Credential | null = fakeCred): SpyPool {
+  const successes: string[] = [];
+  const failures: Array<[string, number | string]> = [];
+  return {
+    pick: async () => cred,
+    size: () => (cred ? 1 : 0),
+    reportSuccess: (uid: string) => {
+      successes.push(uid);
+    },
+    reportFailure: (uid: string, code: number | string) => {
+      failures.push([uid, code]);
+    },
+    successes,
+    failures,
+  };
+}
+
+function buildApp(opts: { downstreamKeys?: string[]; pool?: Pool; upstream?: UpstreamClient; refresh?: { refreshNow(uid: string): Promise<Credential> } } = {}) {
   const config = loadConfig(
     opts.downstreamKeys ? { CODEBUFFY_API_KEYS: opts.downstreamKeys.join(",") } : {},
     () => null,
@@ -133,7 +180,7 @@ function buildApp(opts: { downstreamKeys?: string[]; pool?: Pool; upstream?: Ups
   const logger = createLogger({ ...config, logLevel: "silent" } as never);
   const pool = opts.pool ?? makeMockPool();
   const upstream = opts.upstream ?? new MockUpstream();
-  return createApp({ config, logger, startedAt: Date.now(), pool, upstream });
+  return createApp({ config, logger, startedAt: Date.now(), pool, upstream, refresh: opts.refresh });
 }
 
 function baseBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -884,5 +931,107 @@ describe("app wiring responses", () => {
     expect(r.status).toBe(200);
     const body = (await r.json()) as { status: string };
     expect(body.status).toBe("ok");
+  });
+});
+
+describe("pool outcome reporting + live auth refresh (responses)", () => {
+  function freshCredential(): Credential {
+    return { ...fakeCred, auth: { ...fakeCred.auth, accessToken: "fresh.token" } };
+  }
+
+  it("success path reports recordSuccess to the pool", async () => {
+    const pool = makeSpyPool();
+    const app = buildApp({ pool });
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(baseBody()),
+    });
+    expect(res.status).toBe(200);
+    expect(pool.successes).toEqual([fakeCred.uid]);
+    expect(pool.failures).toEqual([]);
+  });
+
+  it("upstream error reports reportFailure with the code", async () => {
+    const err = new UpstreamError(500, "server error", 500, true);
+    const pool = makeSpyPool();
+    const app = buildApp({ pool, upstream: new ErrorUpstream(err) });
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(baseBody()),
+    });
+    expect(res.status).toBe(500);
+    expect(pool.failures).toEqual([[fakeCred.uid, 500]]);
+  });
+
+  it("401 on first consumption triggers exactly one refreshNow and succeeds", async () => {
+    const upstream = new AuthRetryUpstream(new UpstreamError(401, "token revoked", 401, true));
+    const fresh = freshCredential();
+    let refreshCalls = 0;
+    const refresh = {
+      refreshNow: async (uid: string) => {
+        refreshCalls++;
+        expect(uid).toBe(fakeCred.uid);
+        return fresh;
+      },
+    };
+    const app = buildApp({ upstream, refresh });
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(baseBody()),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { status: string; output: Array<Record<string, unknown>> };
+    expect(body.status).toBe("completed");
+    expect(refreshCalls).toBe(1);
+    expect(upstream.calls).toBe(2);
+    expect(upstream.credsSeen[1]).toBe(fresh);
+  });
+
+  it("401 after first chunk does NOT retry; emits responses error event", async () => {
+    const err = new UpstreamError(401, "token expired mid-stream", 401, true);
+    let refreshCalls = 0;
+    const refresh = {
+      refreshNow: async () => {
+        refreshCalls++;
+        return freshCredential();
+      },
+    };
+    const pool = makeSpyPool();
+    const app = buildApp({ pool, upstream: new MidStreamErrorUpstream(err), refresh });
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(baseBody({ stream: true })),
+    });
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    const frames = parseResponsesSSE(text);
+    const errorFrame = frames.find((f) => f.type === "error");
+    expect(errorFrame).toBeDefined();
+    expect(JSON.stringify(errorFrame)).toContain("401");
+    expect(text).toContain("response.output_text.delta"); // first chunk was already emitted
+    expect(refreshCalls).toBe(0); // no restart post-first-byte
+    expect(pool.failures).toEqual([[fakeCred.uid, 401]]);
+  });
+
+  it("refresh throwing surfaces the original upstream error", async () => {
+    const err = new UpstreamError(403, "forbidden", 403, true);
+    const refresh = {
+      refreshNow: async () => {
+        throw new Error("refresh endpoint down");
+      },
+    };
+    const app = buildApp({ upstream: new AuthRetryUpstream(err), refresh });
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(baseBody()),
+    });
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: { type: string } };
+    expect(body.error.type).toBeDefined();
   });
 });

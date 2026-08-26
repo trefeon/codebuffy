@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { SqliteCredentialStore } from "../src/credentials/store";
 import { RoundRobinPool } from "../src/pool/round-robin";
+import { CredentialState } from "../src/pool/state";
 import type { Credential } from "../src/credentials/types";
 import type { Logger } from "pino";
 import type { RefreshService } from "../src/credentials/refresh";
@@ -269,5 +270,76 @@ describe("RoundRobinPool", () => {
     expect(p4).not.toBeNull();
     // After wrap, idx should be small number
     expect((pool as unknown as { idx: number }).idx).toBeLessThan(10);
+  });
+});
+
+describe("RoundRobinPool inference outcome reporting", () => {
+  it("reportFailure(11140) bans credential and pick() skips it", async () => {
+    const { store } = createStoreWithCreds(["banned-one", "healthy-one"]);
+    const refresh = stubRefresh({
+      ensureFresh: async (uid) => store.get(uid)!,
+    }) as unknown as RefreshService;
+    const pool = new RoundRobinPool(store, refresh, makeLogger());
+
+    pool.reportFailure("banned-one", 11140);
+    expect(pool.getState("banned-one")).toBe(CredentialState.Banned);
+
+    // Every pick must avoid the banned uid and keep serving the healthy one.
+    const picks: string[] = [];
+    for (let i = 0; i < 4; i++) {
+      const cred = await pool.pick();
+      expect(cred).not.toBeNull();
+      picks.push(cred!.uid);
+    }
+    expect(picks.every((uid) => uid !== "banned-one")).toBe(true);
+    expect(pool.getStats()[CredentialState.Banned]).toBe(1);
+  });
+
+  it("reportFailure(14018) marks quota-exhausted and pick() skips it", async () => {
+    const { store } = createStoreWithCreds(["quota-one", "healthy-two"]);
+    const refresh = stubRefresh({
+      ensureFresh: async (uid) => store.get(uid)!,
+    }) as unknown as RefreshService;
+    const pool = new RoundRobinPool(store, refresh, makeLogger());
+
+    pool.reportFailure("quota-one", 14018);
+    expect(pool.getState("quota-one")).toBe(CredentialState.QuotaExhausted);
+    for (let i = 0; i < 3; i++) {
+      const cred = await pool.pick();
+      expect(cred!.uid).not.toBe("quota-one");
+    }
+  });
+
+  it("reportSuccess clears a banned credential back to Active", async () => {
+    const { store } = createStoreWithCreds(["revived"]);
+    const refresh = stubRefresh({
+      ensureFresh: async (uid) => store.get(uid)!,
+    }) as unknown as RefreshService;
+    const pool = new RoundRobinPool(store, refresh, makeLogger());
+
+    pool.reportFailure("revived", 11140);
+    expect(pool.getState("revived")).toBe(CredentialState.Banned);
+    expect(await pool.pick()).toBeNull(); // only credential is banned
+
+    pool.reportSuccess("revived");
+    expect(pool.getState("revived")).toBe(CredentialState.Active);
+    expect((await pool.pick())?.uid).toBe("revived");
+  });
+
+  it("reportFailure with retryable code cools down until expiry window passes", async () => {
+    const { store } = createStoreWithCreds(["cooled"]);
+    const refresh = stubRefresh({
+      ensureFresh: async (uid) => store.get(uid)!,
+    }) as unknown as RefreshService;
+    // Short cooldown so the test stays deterministic without fake timers.
+    const pool = new RoundRobinPool(store, refresh, makeLogger(), { cooldownMs: 5 });
+
+    pool.reportFailure("cooled", 500);
+    expect(pool.getState("cooled")).toBe(CredentialState.Cooldown);
+    expect(await pool.pick()).toBeNull();
+
+    await new Promise((r) => setTimeout(r, 15));
+    expect(pool.getState("cooled")).toBe(CredentialState.Active);
+    expect((await pool.pick())?.uid).toBe("cooled");
   });
 });

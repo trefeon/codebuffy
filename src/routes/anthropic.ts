@@ -5,6 +5,7 @@ import type { Config } from "../config";
 import type { Logger } from "../logger";
 import type { Pool } from "../pool/types";
 import type { UpstreamClient } from "../upstream/client";
+import type { Credential } from "../credentials/types";
 import { UpstreamError } from "../upstream/errors";
 import { parseAnthropicRequest } from "../adapters/anthropic/parser";
 import { ParseError } from "../ir/types";
@@ -86,6 +87,8 @@ export interface AnthropicDeps {
   logger: Logger;
   pool: Pool;
   upstream: UpstreamClient;
+  /** Live-token recovery — forced refresh on inference-time 401/403 (one shot). */
+  refresh?: { refreshNow(uid: string): Promise<Credential> };
 }
 
 export function mountAnthropicRoutes(app: Hono, deps: AnthropicDeps): void {
@@ -136,55 +139,84 @@ export function mountAnthropicRoutes(app: Hono, deps: AnthropicDeps): void {
       chunks = upstream.streamChat(upstreamReq, cred, signal);
     } catch (err) {
       if (err instanceof UpstreamError) {
+        pool.reportFailure?.(cred.uid, err.code);
         const mapped = mapUpstreamErrorToHttp(err);
         return c.json(mapped.body, mapped.status as never);
       }
       throw err;
     }
+    let activeCred: Credential = cred;
+    let retriedAuth = false;
+
+    // One-shot live-token recovery: a 401/403 surfacing before any byte was
+    // sent means the cached AT died early (revoked / clock skew past the
+    // isExpiring lead). Force one refresh + rebuild; never restart mid-stream.
+    const retryWithFreshToken = async (err: UpstreamError): Promise<boolean> => {
+      if (retriedAuth || !deps.refresh) return false;
+      if (err.code !== 401 && err.code !== 403) return false;
+      retriedAuth = true;
+      try {
+        activeCred = await deps.refresh.refreshNow(activeCred.uid);
+      } catch (refreshErr) {
+        logger.warn({ err: refreshErr, uid: activeCred.uid }, "live auth refresh failed; keeping original error");
+        return false;
+      }
+      chunks = upstream.streamChat(upstreamReq, activeCred, signal);
+      return true;
+    };
 
     if (isStream) {
       return streamSSE(c, async (stream) => {
         let lastId: string | undefined;
         let lastUsage: unknown;
-        const wrapped = (async function* () {
-          for await (const chunk of chunks) {
-            if (typeof chunk.id === "string" && chunk.id.length > 0) lastId = chunk.id;
-            if (chunk.usage !== undefined) lastUsage = chunk.usage;
-            yield chunk;
-          }
-        })();
-        try {
-          const id = generateId("msg");
-          for await (const frame of anthropicSSEFromUpstream(wrapped, { id, model: ir.model })) {
-            await stream.write(frame);
-          }
-          if (lastId || lastUsage !== undefined) {
-            try {
-              pushFromUpstreamChunk({ id: lastId, model: ir.model, usage: lastUsage });
-              logger.info({ id: lastId, model: ir.model }, "usage recorded");
-            } catch (e) {
-              logger.warn({ err: e }, "usage push failed");
+        let emitted = false;
+        for (;;) {
+          const wrapped = (async function* () {
+            for await (const chunk of chunks) {
+              if (typeof chunk.id === "string" && chunk.id.length > 0) lastId = chunk.id;
+              if (chunk.usage !== undefined) lastUsage = chunk.usage;
+              yield chunk;
             }
-          }
-        } catch (err) {
-          if (err instanceof UpstreamError) {
-            const mapped = mapUpstreamErrorToHttp(err);
-            await stream.write(formatAnthropicSSE("error", mapped.body));
-          } else {
-            logger.error({ err }, "stream messages failed");
-            await stream.write(
-              formatAnthropicSSE("error", {
-                type: "error",
-                error: { type: "api_error", message: "upstream stream failed" },
-              }),
-            );
+          })();
+          try {
+            const id = generateId("msg");
+            for await (const frame of anthropicSSEFromUpstream(wrapped, { id, model: ir.model })) {
+              emitted = true;
+              await stream.write(frame);
+            }
+            if (lastId || lastUsage !== undefined) {
+              try {
+                pushFromUpstreamChunk({ id: lastId, model: ir.model, usage: lastUsage });
+                logger.info({ id: lastId, model: ir.model }, "usage recorded");
+              } catch (e) {
+                logger.warn({ err: e }, "usage push failed");
+              }
+            }
+            pool.reportSuccess?.(activeCred.uid);
+            break;
+          } catch (err) {
+            if (err instanceof UpstreamError) {
+              pool.reportFailure?.(activeCred.uid, err.code);
+              if (!emitted && (await retryWithFreshToken(err))) continue;
+              const mapped = mapUpstreamErrorToHttp(err);
+              await stream.write(formatAnthropicSSE("error", mapped.body));
+            } else {
+              logger.error({ err }, "stream messages failed");
+              await stream.write(
+                formatAnthropicSSE("error", {
+                  type: "error",
+                  error: { type: "api_error", message: "upstream stream failed" },
+                }),
+              );
+            }
+            break;
           }
         }
       });
     } else {
-      try {
-        const id = generateId("msg");
-        const created = Math.floor(Date.now() / 1000);
+      const id = generateId("msg");
+      const created = Math.floor(Date.now() / 1000);
+      for (;;) {
         let lastId: string | undefined;
         let lastUsage: unknown;
         const wrapped = (async function* () {
@@ -194,45 +226,50 @@ export function mountAnthropicRoutes(app: Hono, deps: AnthropicDeps): void {
             yield chunk;
           }
         })();
-        const aggregated = await aggregateStream(wrapped, { id, model: ir.model, created });
-        const aggRecord = aggregated as Record<string, unknown>;
-        const aggUsage = (aggRecord.usage as unknown) ?? lastUsage;
-        const aggId = lastId ?? (typeof aggRecord.id === "string" ? (aggRecord.id as string) : undefined);
         try {
-          pushFromUpstreamChunk({ id: aggId, model: ir.model, usage: aggUsage });
-          logger.info({ id: aggId, model: ir.model }, "usage recorded");
-        } catch (e) {
-          logger.warn({ err: e }, "usage push failed");
+          const aggregated = await aggregateStream(wrapped, { id, model: ir.model, created });
+          pool.reportSuccess?.(activeCred.uid);
+          const aggRecord = aggregated as Record<string, unknown>;
+          const aggUsage = (aggRecord.usage as unknown) ?? lastUsage;
+          const aggId = lastId ?? (typeof aggRecord.id === "string" ? (aggRecord.id as string) : undefined);
+          try {
+            pushFromUpstreamChunk({ id: aggId, model: ir.model, usage: aggUsage });
+            logger.info({ id: aggId, model: ir.model }, "usage recorded");
+          } catch (e) {
+            logger.warn({ err: e }, "usage push failed");
+          }
+          const aggChoices = aggRecord.choices as Array<{ message?: { content?: string; tool_calls?: unknown }; finish_reason?: string | null }> | undefined;
+          const choice = aggChoices?.[0];
+          const content: string =
+            (choice?.message?.content as string | undefined) ??
+            (typeof aggRecord.content === "string" ? (aggRecord.content as string) : "") ??
+            "";
+          const tool_calls = (choice?.message?.tool_calls as
+            | Array<{ id: string; type: "function"; function: { name: string; arguments: string } }>
+            | undefined) ?? (aggRecord.tool_calls as Array<{ id: string; type: "function"; function: { name: string; arguments: string } }> | undefined);
+          const finish_reason: string | null =
+            (choice?.finish_reason as string | null | undefined) ??
+            (typeof aggRecord.finish_reason === "string" ? (aggRecord.finish_reason as string) : null) ??
+            null;
+          const usage = aggUsage;
+          const body = buildAnthropicResponse(
+            { content, tool_calls, finish_reason, usage },
+            { id, model: ir.model },
+          );
+          return c.json(body);
+        } catch (err) {
+          if (err instanceof UpstreamError) {
+            pool.reportFailure?.(activeCred.uid, err.code);
+            if (await retryWithFreshToken(err)) continue;
+            const mapped = mapUpstreamErrorToHttp(err);
+            return c.json(mapped.body, mapped.status as never);
+          }
+          logger.error({ err }, "messages failed");
+          return c.json(
+            { type: "error", error: { type: "api_error", message: "upstream request failed" } },
+            502,
+          );
         }
-        const aggChoices = aggRecord.choices as Array<{ message?: { content?: string; tool_calls?: unknown }; finish_reason?: string | null }> | undefined;
-        const choice = aggChoices?.[0];
-        const content: string =
-          (choice?.message?.content as string | undefined) ??
-          (typeof aggRecord.content === "string" ? (aggRecord.content as string) : "") ??
-          "";
-        const tool_calls = (choice?.message?.tool_calls as
-          | Array<{ id: string; type: "function"; function: { name: string; arguments: string } }>
-          | undefined) ?? (aggRecord.tool_calls as Array<{ id: string; type: "function"; function: { name: string; arguments: string } }> | undefined);
-        const finish_reason: string | null =
-          (choice?.finish_reason as string | null | undefined) ??
-          (typeof aggRecord.finish_reason === "string" ? (aggRecord.finish_reason as string) : null) ??
-          null;
-        const usage = aggUsage;
-        const body = buildAnthropicResponse(
-          { content, tool_calls, finish_reason, usage },
-          { id, model: ir.model },
-        );
-        return c.json(body);
-      } catch (err) {
-        if (err instanceof UpstreamError) {
-          const mapped = mapUpstreamErrorToHttp(err);
-          return c.json(mapped.body, mapped.status as never);
-        }
-        logger.error({ err }, "messages failed");
-        return c.json(
-          { type: "error", error: { type: "api_error", message: "upstream request failed" } },
-          502,
-        );
       }
     }
   });

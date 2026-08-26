@@ -4,6 +4,7 @@ import type { Config } from "../config";
 import type { Logger } from "../logger";
 import type { Pool } from "../pool/types";
 import type { UpstreamClient } from "../upstream/client";
+import type { Credential } from "../credentials/types";
 import { UpstreamError } from "../upstream/errors";
 import { parseOpenAIChatRequest, ParseError } from "../adapters/openai-chat/parser";
 import { aggregateStream } from "../adapters/openai-chat/aggregator";
@@ -79,6 +80,8 @@ export interface OpenAIDeps {
   logger: Logger;
   pool: Pool;
   upstream: UpstreamClient;
+  /** Live-token recovery — forced refresh on inference-time 401/403 (one shot). */
+  refresh?: { refreshNow(uid: string): Promise<Credential> };
 }
 
 export function mountOpenAIRoutes(app: Hono, deps: OpenAIDeps): void {
@@ -116,60 +119,99 @@ export function mountOpenAIRoutes(app: Hono, deps: OpenAIDeps): void {
       (c.req as unknown as { signal?: AbortSignal }).signal ??
       undefined;
 
-    try {
-      const chunks = upstream.streamChat(upstreamReq, cred, signal);
+    let activeCred: Credential = cred;
+    let chunks = upstream.streamChat(upstreamReq, activeCred, signal);
+    let retriedAuth = false;
 
+    // One-shot live-token recovery: a 401/403 surfacing before any byte was
+    // sent means the cached AT died early (revoked / clock skew past the
+    // isExpiring lead). Force one refresh + rebuild; never restart mid-stream.
+    const retryWithFreshToken = async (err: UpstreamError): Promise<boolean> => {
+      if (retriedAuth || !deps.refresh) return false;
+      if (err.code !== 401 && err.code !== 403) return false;
+      retriedAuth = true;
+      try {
+        activeCred = await deps.refresh.refreshNow(activeCred.uid);
+      } catch (refreshErr) {
+        logger.warn({ err: refreshErr, uid: activeCred.uid }, "live auth refresh failed; keeping original error");
+        return false;
+      }
+      chunks = upstream.streamChat(upstreamReq, activeCred, signal);
+      return true;
+    };
+
+    try {
       if (isStream) {
         return streamSSE(c, async (stream) => {
           let lastId: string | undefined;
           let lastUsage: unknown;
-          try {
-            for await (const chunk of chunks) {
-              if (typeof chunk.id === "string" && chunk.id.length > 0) lastId = chunk.id;
-              if (chunk.usage !== undefined) lastUsage = chunk.usage;
-              await stream.writeSSE({ data: JSON.stringify(chunk) });
-            }
-            if (lastId || lastUsage !== undefined) {
-              try {
-                pushFromUpstreamChunk({ id: lastId, model: ir.model, usage: lastUsage });
-                logger.info({ id: lastId, model: ir.model }, "usage recorded");
-              } catch (e) {
-                logger.warn({ err: e }, "usage push failed");
+          let emitted = false;
+          for (;;) {
+            try {
+              for await (const chunk of chunks) {
+                if (typeof chunk.id === "string" && chunk.id.length > 0) lastId = chunk.id;
+                if (chunk.usage !== undefined) lastUsage = chunk.usage;
+                emitted = true;
+                await stream.writeSSE({ data: JSON.stringify(chunk) });
               }
-            }
-            await stream.writeSSE({ data: "[DONE]" });
-          } catch (err) {
-            if (err instanceof UpstreamError) {
-              const mapped = mapUpstreamErrorToHttp(err);
-              await stream.writeSSE({ event: "error", data: JSON.stringify(mapped.body) });
-            } else {
-              logger.error({ err }, "stream chat failed");
-              await stream.writeSSE({ event: "error", data: JSON.stringify({ error: { message: "upstream stream failed", type: "api_error" } }) });
+              pool.reportSuccess?.(activeCred.uid);
+              break;
+            } catch (err) {
+              if (err instanceof UpstreamError) {
+                pool.reportFailure?.(activeCred.uid, err.code);
+                if (!emitted && (await retryWithFreshToken(err))) continue;
+                const mapped = mapUpstreamErrorToHttp(err);
+                await stream.writeSSE({ event: "error", data: JSON.stringify(mapped.body) });
+              } else {
+                logger.error({ err }, "stream chat failed");
+                await stream.writeSSE({ event: "error", data: JSON.stringify({ error: { message: "upstream stream failed", type: "api_error" } }) });
+              }
+              break;
             }
           }
+          if (lastId || lastUsage !== undefined) {
+            try {
+              pushFromUpstreamChunk({ id: lastId, model: ir.model, usage: lastUsage });
+              logger.info({ id: lastId, model: ir.model }, "usage recorded");
+            } catch (e) {
+              logger.warn({ err: e }, "usage push failed");
+            }
+          }
+          await stream.writeSSE({ data: "[DONE]" });
         });
       } else {
         const id = generateId("chatcmpl");
         const created = Math.floor(Date.now() / 1000);
-        let lastId: string | undefined;
-        let lastUsage: unknown;
-        const wrapped = (async function* () {
-          for await (const chunk of chunks) {
-            if (typeof chunk.id === "string" && chunk.id.length > 0) lastId = chunk.id;
-            if (chunk.usage !== undefined) lastUsage = chunk.usage;
-            yield chunk;
+        for (;;) {
+          let lastId: string | undefined;
+          let lastUsage: unknown;
+          const wrapped = (async function* () {
+            for await (const chunk of chunks) {
+              if (typeof chunk.id === "string" && chunk.id.length > 0) lastId = chunk.id;
+              if (chunk.usage !== undefined) lastUsage = chunk.usage;
+              yield chunk;
+            }
+          })();
+          try {
+            const aggregated = await aggregateStream(wrapped, { id, model: ir.model, created });
+            pool.reportSuccess?.(activeCred.uid);
+            const finalUsage = aggregated.usage ?? lastUsage;
+            const finalId = lastId ?? (typeof aggregated.id === "string" ? aggregated.id : undefined);
+            try {
+              pushFromUpstreamChunk({ id: finalId, model: ir.model, usage: finalUsage });
+              logger.info({ id: finalId, model: ir.model }, "usage recorded");
+            } catch (e) {
+              logger.warn({ err: e }, "usage push failed");
+            }
+            return c.json(aggregated);
+          } catch (err) {
+            if (err instanceof UpstreamError) {
+              pool.reportFailure?.(activeCred.uid, err.code);
+              if (await retryWithFreshToken(err)) continue;
+            }
+            throw err;
           }
-        })();
-        const aggregated = await aggregateStream(wrapped, { id, model: ir.model, created });
-        const finalUsage = aggregated.usage ?? lastUsage;
-        const finalId = lastId ?? (typeof aggregated.id === "string" ? aggregated.id : undefined);
-        try {
-          pushFromUpstreamChunk({ id: finalId, model: ir.model, usage: finalUsage });
-          logger.info({ id: finalId, model: ir.model }, "usage recorded");
-        } catch (e) {
-          logger.warn({ err: e }, "usage push failed");
         }
-        return c.json(aggregated);
       }
     } catch (err) {
       if (err instanceof UpstreamError) {
