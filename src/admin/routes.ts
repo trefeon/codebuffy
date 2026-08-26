@@ -6,6 +6,8 @@ import type { Credential } from "../credentials/types";
 import { passkeyNotImplemented } from "./auth";
 import { listUsage } from "../observability/usage";
 import { fetchUsageQuota, QuotaError } from "../upstream/usage-quota";
+import { credentialFromDeviceFlow, pollDeviceFlow, startDeviceFlow } from "../credentials/device-flow";
+import type { DeviceFlowDomain } from "../credentials/device-flow";
 
 export interface CheckinSchedulerLike {
   trigger(uid: string): Promise<unknown>;
@@ -22,6 +24,8 @@ export interface MountAdminDeps {
     getStats?: () => unknown;
   };
   checkinScheduler?: CheckinSchedulerLike | null;
+  /** Injectable fetch for device-flow upstream calls (tests). */
+  fetchImpl?: typeof fetch;
 }
 
 function sanitizeCredential(cred: Credential, state?: string | undefined) {
@@ -35,6 +39,16 @@ function sanitizeCredential(cred: Credential, state?: string | undefined) {
     state: state ?? null,
     checkinEnabled: cred.checkinEnabled ?? false,
   };
+}
+
+/** Narrow parsed JSON to a plain record; null for any non-object shape. */
+function jsonRecord(v: unknown): Record<string, unknown> | null {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  return v as Record<string, unknown>;
+}
+
+function parseDeviceDomain(v: unknown): DeviceFlowDomain | null {
+  return v === "cn" || v === "intl" ? v : null;
 }
 
 export function mountAdminRoutes(app: Hono, deps: MountAdminDeps): void {
@@ -170,6 +184,70 @@ export function mountAdminRoutes(app: Hono, deps: MountAdminDeps): void {
       }
       logger.error({ err: String(err), uid: cred.uid }, "quota fetch failed");
       return c.json({ error: { code: "UPSTREAM_ERROR", message: "failed to fetch quota" } }, 502);
+    }
+  });
+
+  // POST /admin/credentials/device-flow/start — kick off a headless OAuth
+  // device-flow login. Body {domain:"cn"|"intl"}; returns the opaque state and
+  // authUrl for the operator's browser.
+  app.post("/admin/credentials/device-flow/start", async (c) => {
+    const rec = jsonRecord(await c.req.json().catch(() => undefined));
+    const domain = parseDeviceDomain(rec?.domain);
+    if (!domain) {
+      return c.json({ error: { code: "INVALID_DOMAIN", message: `domain must be "cn" or "intl"` } }, 400);
+    }
+    try {
+      const start = await startDeviceFlow(domain, { fetchImpl: deps.fetchImpl });
+      logger.info({ domain }, "device-flow login started");
+      return c.json({ ok: true, ...start });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error({ err: msg, domain }, "device-flow start failed");
+      return c.json({ error: { code: "DEVICE_FLOW_FAILED", message: msg } }, 502);
+    }
+  });
+
+  // POST /admin/credentials/device-flow/poll — one poll round for an in-flight
+  // device flow. Body {domain, state, uid?}. Pending is 200 {status:"pending"};
+  // success persists a Credential (source "device-flow") through the shared
+  // normalizePoolFile factory and returns it token-sanitized.
+  app.post("/admin/credentials/device-flow/poll", async (c) => {
+    if (!store) return c.json({ error: { code: "UNAVAILABLE", message: "store not configured" } }, 503);
+    const rec = jsonRecord(await c.req.json().catch(() => undefined));
+    const domain = parseDeviceDomain(rec?.domain);
+    if (!domain) {
+      return c.json({ error: { code: "INVALID_DOMAIN", message: `domain must be "cn" or "intl"` } }, 400);
+    }
+    const state = typeof rec?.state === "string" && rec.state ? rec.state : null;
+    if (!state) {
+      return c.json({ error: { code: "INVALID_STATE", message: "state is required" } }, 400);
+    }
+    const uidOverride = typeof rec?.uid === "string" && rec.uid ? rec.uid : undefined;
+    const result = await pollDeviceFlow(domain, state, { fetchImpl: deps.fetchImpl }).catch(
+      (err: unknown): null => {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error({ err: msg, domain }, "device-flow poll failed");
+        return null;
+      },
+    );
+    if (!result) {
+      return c.json({ error: { code: "DEVICE_FLOW_FAILED", message: "device-flow poll request failed" } }, 502);
+    }
+    if (result.status === "pending") {
+      return c.json({ ok: true, status: "pending", intervalSec: 5 });
+    }
+    if (result.status === "error") {
+      return c.json({ error: { code: "DEVICE_FLOW_ERROR", message: result.message } }, 502);
+    }
+    try {
+      const cred = credentialFromDeviceFlow({ domain, state, tokens: result.tokens, uid: uidOverride });
+      store.upsert(cred);
+      logger.info({ uid: cred.uid, domain: cred.domain }, "device-flow credential stored");
+      return c.json({ ok: true, status: "success", credential: sanitizeCredential(cred) });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error({ err: msg, domain }, "device-flow credential persist failed");
+      return c.json({ error: { code: "DEVICE_FLOW_PERSIST_FAILED", message: msg } }, 502);
     }
   });
 }
