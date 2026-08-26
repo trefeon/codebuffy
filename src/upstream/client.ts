@@ -5,6 +5,7 @@ import type { UpstreamChatRequest, UpstreamChunk } from "./types";
 import { buildUpstreamHeaders } from "./headers";
 import { sanitizeUpstreamBody } from "./sanitize";
 import { UpstreamError, isRetryable } from "./errors";
+import { stripEmptyToolCallDeltas } from "./chunk-sanitize";
 
 function buildCompositeSignal(
   external: AbortSignal | undefined,
@@ -196,7 +197,9 @@ export class UpstreamClient {
       }
       // Unexpected json body on streaming endpoint — treat as single chunk if it looks like chunk
       if (parsed && typeof parsed === "object" && "choices" in (parsed as Record<string, unknown>)) {
-        yield parsed as UpstreamChunk;
+        const chunk = parsed as UpstreamChunk;
+        stripEmptyToolCallDeltas(chunk);
+        yield chunk;
       }
       return;
     }
@@ -267,14 +270,18 @@ export class UpstreamClient {
             }
             // code 0 envelope — unwrap inner data if it looks like a chunk
             if (rec.data && typeof rec.data === "object" && "choices" in (rec.data as Record<string, unknown>)) {
-              yield rec.data as UpstreamChunk;
+              const chunk = rec.data as UpstreamChunk;
+              stripEmptyToolCallDeltas(chunk);
+              yield chunk;
               continue;
             }
             // envelope with data being primitive — skip
             continue;
           }
 
-          yield parsed as UpstreamChunk;
+          const chunk = parsed as UpstreamChunk;
+          stripEmptyToolCallDeltas(chunk);
+          yield chunk;
         }
       }
 
@@ -291,7 +298,9 @@ export class UpstreamClient {
                 throw new UpstreamError(rec.code, rec.msg ?? rec.message ?? "upstream business error", res.status, isRetryable(rec.code), parsed);
               }
             } else {
-              yield parsed as UpstreamChunk;
+              const chunk = parsed as UpstreamChunk;
+              stripEmptyToolCallDeltas(chunk);
+              yield chunk;
             }
           } catch (e) {
             if (e instanceof UpstreamError) throw e;
