@@ -57,7 +57,8 @@ export class UpstreamClient {
   }
 
   async fetchModels(credential: Credential): Promise<unknown> {
-    const url = `${this.config.apiBase.replace(/\/+$/, "")}/v3/config`;
+    const base = (credential.apiBase || this.config.apiBase).replace(/\/+$/, "");
+    const url = `${base}/v3/config`;
     const headers = buildUpstreamHeaders(credential);
     headers["Accept"] = "application/json";
 
@@ -124,11 +125,11 @@ export class UpstreamClient {
     credential: Credential,
     signal?: AbortSignal,
   ): AsyncIterable<UpstreamChunk> {
-    const url = `${this.config.apiBase.replace(/\/+$/, "")}/v2/chat/completions`;
+    const base = (credential.apiBase || this.config.apiBase).replace(/\/+$/, "");
+    const url = `${base}/v2/chat/completions`;
     const headers = buildUpstreamHeaders(credential);
     headers["Content-Type"] = "application/json";
     headers["Accept"] = "text/event-stream";
-
     // Force stream:true upstream (stream-only backend)
     const body: Record<string, unknown> = { ...req, stream: true };
 

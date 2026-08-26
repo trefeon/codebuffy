@@ -241,9 +241,10 @@ export class RefreshService {
     const headers = buildRefreshHeaders(cred);
     const body = JSON.stringify({});
 
-    const bases = [this.config.apiBase, this.config.consoleBase];
+    const bases = Array.from(
+      new Set([cred.apiBase || this.config.apiBase, cred.consoleBase || this.config.consoleBase].filter(Boolean) as string[]),
+    );
     let lastError: unknown = null;
-
     for (let i = 0; i < bases.length; i++) {
       const base = bases[i];
       if (!base) continue;

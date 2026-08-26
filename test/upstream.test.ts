@@ -13,7 +13,7 @@ function makeCredential(overrides: Partial<Credential> = {}): Credential {
   const base: Credential = {
     uid: "user-123",
     domain: "www.codebuddy.cn",
-    apiBase: "https://copilot.tencent.com",
+    apiBase: "" as unknown as string,
     consoleBase: "https://www.codebuddy.cn",
     enterpriseId: "ent-456",
     label: "test",
