@@ -561,9 +561,29 @@ describe("parseAnthropicRequest", () => {
     expect(() => parseAnthropicRequest(base({ messages: "hi" as any }))).toThrow(ParseError);
   });
 
-  it("rejects message with invalid role", () => {
+  it("folds inline role:'system' message into leading system (Claude Code pattern)", () => {
+    const ir = parseAnthropicRequest(
+      base({ messages: [{ role: "user", content: "hi" }, { role: "system", content: "stay terse" }] }),
+    );
+    expect(ir.messages[0]!.role).toBe("system");
+    expect(ir.messages[0]!.content).toContain("stay terse");
+    expect(ir.messages.filter((m) => m.role === "system")).toHaveLength(1);
+  });
+
+  it("creates leading system when only an inline system turn exists", () => {
+    const ir = parseAnthropicRequest(
+      base({
+        system: "",
+        messages: [{ role: "system", content: "be brief" }, { role: "user", content: "go" }],
+      }),
+    );
+    expect(ir.messages[0]!.role).toBe("system");
+    expect(ir.messages[0]!.content).toBe("be brief");
+  });
+
+  it("still rejects genuinely invalid roles (e.g. tool as bare message)", () => {
     expect(() =>
-      parseAnthropicRequest(base({ messages: [{ role: "system", content: "hi" } as any] })),
+      parseAnthropicRequest(base({ messages: [{ role: "tool", content: "x" }] })),
     ).toThrow(ParseError);
   });
 

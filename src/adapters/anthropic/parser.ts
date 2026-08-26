@@ -56,8 +56,12 @@ export function parseAnthropicRequest(raw: unknown): IRRequest {
     throw new ParseError("max_tokens: required positive integer");
   }
 
-  // System handling: string or array of text blocks -> IR system message
+  // System handling: string or array of text blocks -> IR system message.
+  // Claude Code also injects `role:"system"` entries INSIDE messages[] —
+  // fold their text into the leading system instead of rejecting (the real
+  // Anthropic API tolerates them; CodeBuddy upstream only accepts a leading one).
   const irMessages: IRMessage[] = [];
+  const inlineSystemParts: string[] = [];
   if (body.system !== undefined) {
     const sys = body.system as AnthropicSystem;
     let systemText = "";
@@ -73,12 +77,22 @@ export function parseAnthropicRequest(raw: unknown): IRRequest {
       throw new ParseError(`messages.${idx}: must be an object`);
     }
     const role = m.role as string;
+    if (role === "system") {
+      // Fold inline system turn into the leading system message later.
+      const c = m.content as unknown;
+      if (typeof c === "string") inlineSystemParts.push(c);
+      else if (Array.isArray(c)) {
+        const blocks = c as Array<{ type: string; text?: string }>;
+        inlineSystemParts.push(joinTextBlocks(blocks.filter((b) => b.type === "text") as Array<{ type: "text"; text: string }>));
+      }
+      continue;
+    }
     if (role !== "user" && role !== "assistant") {
-      throw new ParseError(`messages.${idx}.role: must be user or assistant`);
+      const roles = (body.messages as unknown[]).map((x) => (x as Record<string, unknown>)?.role).join(",");
+      throw new ParseError(`messages.${idx}.role: must be user or assistant (got "${String(role)}"; all roles: [${roles}])`);
     }
 
     const rawContent = m.content as unknown;
-
     if (role === "user") {
       // User content may be string or array with text/image/tool_result/thinking
       if (typeof rawContent === "string") {
@@ -163,6 +177,20 @@ export function parseAnthropicRequest(raw: unknown): IRRequest {
         irMessages.push(msg);
       } else {
         throw new ParseError(`messages.${idx}.content: must be string or array`);
+      }
+    }
+  }
+
+  // Fold any inline `role:"system"` turns into the leading system message
+  // (create one if the request had no top-level system).
+  if (inlineSystemParts.length > 0) {
+    const folded = inlineSystemParts.join("\n\n").trim();
+    if (folded) {
+      const head = irMessages[0];
+      if (head && head.role === "system") {
+        head.content = `${head.content}\n\n${folded}`.trim();
+      } else {
+        irMessages.unshift({ role: "system", content: folded });
       }
     }
   }

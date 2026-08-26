@@ -3,6 +3,7 @@ import type { Logger } from "../logger";
 import type { Credential } from "../credentials/types";
 import type { UpstreamChatRequest, UpstreamChunk } from "./types";
 import { buildUpstreamHeaders } from "./headers";
+import { sanitizeUpstreamBody } from "./sanitize";
 import { UpstreamError, isRetryable } from "./errors";
 
 function buildCompositeSignal(
@@ -131,8 +132,7 @@ export class UpstreamClient {
     headers["Content-Type"] = "application/json";
     headers["Accept"] = "text/event-stream";
     // Force stream:true upstream (stream-only backend)
-    const body: Record<string, unknown> = { ...req, stream: true };
-
+    const body: Record<string, unknown> = sanitizeUpstreamBody({ ...req, stream: true });
     const compositeSignal = buildCompositeSignal(signal, this.config.upstreamTimeoutMs);
 
     // Early abort check — terminate cleanly without issuing fetch
