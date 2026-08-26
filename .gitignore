@@ -48,3 +48,6 @@ out/
 
 *.xlsx
 *.xls
+
+# Session handoff notes — local only
+handoff/
