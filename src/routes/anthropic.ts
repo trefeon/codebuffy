@@ -17,7 +17,7 @@ import {
 } from "../adapters/anthropic/emitter";
 import { randomBytes } from "node:crypto";
 import { pushFromUpstreamChunk } from "../observability/usage";
-import { resolveModelId, ensureLeadingSystem } from "../models/aliases";
+import { ensureLeadingSystem } from "../ir/ensure-leading-system";
 
 function generateId(prefix = "msg"): string {
   const sep = prefix.endsWith("_") || prefix.endsWith("-") ? "" : "_";
@@ -115,7 +115,7 @@ export function mountAnthropicRoutes(app: Hono, deps: AnthropicDeps): void {
       throw e;
     }
     const isStream = ir.stream === true;
-    ir = ensureLeadingSystem({ ...ir, model: resolveModelId(ir.model) });
+    ir = ensureLeadingSystem(ir);
     const cred = await pool.pick();
     if (!cred) {
       return c.json(

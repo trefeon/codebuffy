@@ -19,7 +19,7 @@ import {
 } from "../adapters/responses/emitter";
 import { randomBytes } from "node:crypto";
 import { pushFromUpstreamChunk } from "../observability/usage";
-import { resolveModelId, ensureLeadingSystem } from "../models/aliases";
+import { ensureLeadingSystem } from "../ir/ensure-leading-system";
 
 function generateId(prefix = "resp"): string {
   const sep = prefix.endsWith("_") || prefix.endsWith("-") ? "" : "_";
@@ -82,7 +82,7 @@ export function mountResponsesRoutes(app: Hono, deps: ResponsesDeps): void {
       }
       throw e;
     }
-    ir = ensureLeadingSystem({ ...ir, model: resolveModelId(ir.model) });
+    ir = ensureLeadingSystem(ir);
 
     // projection handling
     const bodyRec = raw as Record<string, unknown>;
