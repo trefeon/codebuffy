@@ -8,6 +8,7 @@ export default tseslint.config(
       "reference/**",
       "research/**",
       "devdocs/**",
+      "coverage/**",
       "dist/**",
       ".agents/**",
       ".claude/**",
