@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "test": "bun test test/"
+    "test": "bun scripts/run-tests.mjs"
   },
   "engines": {
     "bun": ">=1.3.14"

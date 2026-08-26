@@ -10,6 +10,7 @@ import { aggregateStream } from "../adapters/openai-chat/aggregator";
 import { toUpstreamRequest } from "../ir/types";
 import { randomBytes } from "node:crypto";
 import { pushFromUpstreamChunk } from "../observability/usage";
+import { catalogForSite, siteForBase, specForId, type Site } from "../models/catalog";
 
 function generateId(prefix = "chatcmpl"): string {
   return `${prefix}-${randomBytes(12).toString("hex")}`;
@@ -179,19 +180,46 @@ export function mountOpenAIRoutes(app: Hono, deps: OpenAIDeps): void {
     }
   });
 
+  const enrich = (entry: { id: string; object: "model"; created: number; owned_by: string }, site: Site) => {
+    const spec = specForId(entry.id);
+    return spec
+      ? {
+          ...entry,
+          codebuddy: {
+            site,
+            name: spec.name,
+            contextWindow: spec.limit?.context ?? null,
+            maxOutputTokens: spec.limit?.output ?? null,
+            cost: spec.cost,
+            reasoning: spec.reasoning,
+            toolCall: spec.toolCall,
+            structuredOutput: spec.structuredOutput,
+            modalities: spec.modalities,
+            modelsDevRef: spec.modelsDevRef,
+          },
+        }
+      : entry;
+  };
+
   app.get("/v1/models", async (c) => {
     const cred = await pool.pick();
     if (!cred) {
       return c.json({ error: { message: "No credentials available", type: "server_error", param: null, code: "no_credentials" } }, 503);
     }
+    const site = siteForBase(cred.apiBase);
     try {
       const raw = await upstream.fetchModels(cred);
-      const data = normalizeModels(raw);
+      const data = normalizeModels(raw).map((m) => enrich(m, site));
       return c.json({ object: "list", data });
     } catch (err) {
       if (err instanceof UpstreamError) {
-        const mapped = mapUpstreamErrorToHttp(err);
-        return c.json(mapped.body, mapped.status as 400 | 401 | 403 | 429 | 500 | 502 | 503);
+        // Upstream unavailable — serve generated catalog for this site instead of failing.
+        logger.warn({ err, site }, "models fetch failed; serving generated catalog");
+        const now = Math.floor(Date.now() / 1000);
+        const data = catalogForSite(site).map((m) =>
+          enrich({ id: m.id, object: "model" as const, created: now, owned_by: "tencent" }, site),
+        );
+        return c.json({ object: "list", data });
       }
       logger.error({ err }, "models fetch failed");
       return c.json({ error: { message: "failed to fetch models", type: "api_error", param: null, code: "upstream_error" } }, 502);
@@ -202,18 +230,24 @@ export function mountOpenAIRoutes(app: Hono, deps: OpenAIDeps): void {
     const id = c.req.param("id");
     const cred = await pool.pick();
     if (!cred) return c.json({ error: { message: "No credentials available", type: "server_error", param: null, code: "no_credentials" } }, 503);
+    const site = siteForBase(cred.apiBase);
     try {
       const raw = await upstream.fetchModels(cred);
       const data = normalizeModels(raw);
       const found = data.find((m) => m.id === id);
       if (!found) return c.json({ error: { message: `Model ${id} not found`, type: "invalid_request_error", param: "model", code: "model_not_found" } }, 404);
-      return c.json(found);
+      return c.json(enrich(found, site));
     } catch (err) {
       if (err instanceof UpstreamError) {
+        const fallback = catalogForSite(site).find((m) => m.id === id);
+        if (fallback) {
+          const now = Math.floor(Date.now() / 1000);
+          return c.json(enrich({ id: fallback.id, object: "model" as const, created: now, owned_by: "tencent" }, site));
+        }
         const mapped = mapUpstreamErrorToHttp(err);
         return c.json(mapped.body, mapped.status as 400 | 401 | 403 | 429 | 500 | 502 | 503);
       }
       return c.json({ error: { message: "failed to fetch model", type: "api_error", param: null, code: "upstream_error" } }, 502);
     }
   });
-}
+ }
