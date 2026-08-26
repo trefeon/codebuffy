@@ -45,3 +45,6 @@ Desktop.ini
 # Wireframe/audit artifacts — local only
 local/
 out/
+
+*.xlsx
+*.xls
