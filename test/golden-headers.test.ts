@@ -71,10 +71,9 @@ describe("FINGERPRINT_UA canary", () => {
   it("matches the mandated CLI/CodeBuddy fingerprint shape", () => {
     expect(FINGERPRINT_UA).toMatch(/^CLI\/\S+ CodeBuddy\//);
   });
-  // NOTE: research/02 §4 mandates CLI/<digits>, but current FINGERPRINT_UA is
-  // "CLI/unknown CodeBuddy/2.139.0" (literal `unknown` placeholder). Canary
-  // pins the structural shape only; tightening to /^CLI\/\d/ would fail today
-  // — flagged as a src-side bug, see test report.
+  it("fingerprint UA is config-driven CLI/<digits> (was CLI/unknown placeholder)", () => {
+    expect(FINGERPRINT_UA).toMatch(/^CLI\/\d[\d.]* CodeBuddy\/\d[\d.]*$/);
+  });
 });
 
 describe("buildUpstreamHeaders golden snapshots", () => {
@@ -83,24 +82,32 @@ describe("buildUpstreamHeaders golden snapshots", () => {
     expect(buildUpstreamHeaders(cred, { requestId: "fixed-request-id-0001" })).toEqual({
       Authorization: "Bearer at-golden-oauth",
       "X-Product": "SaaS",
+      "X-IDE-Type": "CLI",
+      "X-IDE-Name": "CLI",
+      "x-requested-with": "XMLHttpRequest",
+      "x-codebuddy-request": "1",
       "X-Domain": "copilot.tencent.com",
       "X-User-Id": "uid-golden-1",
       "x-client-platform": "web",
-      "User-Agent": "CLI/unknown CodeBuddy/2.139.0",
+      "User-Agent": "CLI/2.63.2 CodeBuddy/2.63.2",
       "X-Request-Id": "fixed-request-id-0001",
     });
   });
 
   it("oauth mode on www.codebuddy.ai pins exact header set", () => {
-    const cred = makeCred({ uid: "uid-golden-intl", domain: "www.codebuddy.ai" });
+    const cred = makeCred({ uid: "uid-golden-intl", domain: "www.codebuddy.ai", apiBase: "https://www.codebuddy.ai" });
     cred.auth.accessToken = "at-golden-intl";
     expect(buildUpstreamHeaders(cred, { requestId: "fixed-request-id-0002" })).toEqual({
       Authorization: "Bearer at-golden-intl",
       "X-Product": "SaaS",
+      "X-IDE-Type": "IDE",
+      "X-IDE-Name": "IDE",
+      "x-requested-with": "XMLHttpRequest",
+      "x-codebuddy-request": "1",
       "X-Domain": "www.codebuddy.ai",
       "X-User-Id": "uid-golden-intl",
       "x-client-platform": "web",
-      "User-Agent": "CLI/unknown CodeBuddy/2.139.0",
+      "User-Agent": "IDE/2.63.2 CodeBuddy/2.63.2",
       "X-Request-Id": "fixed-request-id-0002",
     });
   });
@@ -113,10 +120,14 @@ describe("buildUpstreamHeaders golden snapshots", () => {
       Authorization: "Bearer at-golden-key",
       "X-API-Key": "cbk_golden_full_key",
       "X-Product": "SaaS",
+      "X-IDE-Type": "CLI",
+      "X-IDE-Name": "CLI",
+      "x-requested-with": "XMLHttpRequest",
+      "x-codebuddy-request": "1",
       "X-Domain": "www.codebuddy.ai",
       "X-User-Id": "uid-golden-key",
       "x-client-platform": "web",
-      "User-Agent": "CLI/unknown CodeBuddy/2.139.0",
+      "User-Agent": "CLI/2.63.2 CodeBuddy/2.63.2",
       "X-Request-Id": "fixed-request-id-0003",
     });
   });
@@ -137,11 +148,15 @@ describe("buildUpstreamHeaders golden snapshots", () => {
       Authorization: "Bearer at-golden-ent",
       "X-Enterprise-Id": "ent-42",
       "X-Product": "SaaS",
+      "X-IDE-Type": "CLI",
+      "X-IDE-Name": "CLI",
+      "x-requested-with": "XMLHttpRequest",
+      "x-codebuddy-request": "1",
       "X-Domain": "copilot.tencent.com",
       "X-User-Id": "uid-golden-ent",
       "x-client-platform": "web",
       "X-Request-Id": "fixed-request-id-0004",
-      "User-Agent": "CLI/unknown CodeBuddy/2.139.0",
+      "User-Agent": "CLI/2.63.2 CodeBuddy/2.63.2",
       "X-Refresh-Token": "rt-inline-refresh",
       "X-Auth-Refresh-Source": "plugin",
     });
@@ -195,7 +210,7 @@ describe("RefreshService wire identity (buildRefreshHeaders / buildValidationHea
       "X-Product": "SaaS",
       "X-Domain": "copilot.tencent.com",
       "x-client-platform": "web",
-      "User-Agent": "CLI/unknown CodeBuddy/2.139.0",
+      "User-Agent": "CLI/2.63.2 CodeBuddy/2.63.2",
       "X-User-Id": "uid-refresh-golden",
       "X-Enterprise-Id": "ent-77",
       "X-Tenant-Id": "ent-77",
@@ -244,7 +259,7 @@ describe("RefreshService wire identity (buildRefreshHeaders / buildValidationHea
       "X-Product": "SaaS",
       "X-Domain": "www.codebuddy.ai",
       "x-client-platform": "web",
-      "User-Agent": "CLI/unknown CodeBuddy/2.139.0",
+      "User-Agent": "CLI/2.63.2 CodeBuddy/2.63.2",
       Accept: "application/json",
       "X-User-Id": "uid-validate-golden",
       "X-Enterprise-Id": "ent-99",
