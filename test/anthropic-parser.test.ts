@@ -86,7 +86,7 @@ describe("parseAnthropicRequest", () => {
     ]);
   });
 
-  it("drops image blocks in user array (empty array → empty user)", () => {
+  it("forwards image-only user array (empty text, images carried)", () => {
     const ir = parseAnthropicRequest(
       base({
         messages: [
@@ -102,11 +102,13 @@ describe("parseAnthropicRequest", () => {
         ],
       }),
     );
-    // no text, no tool_results => emits empty user "" to preserve turn
-    expect(ir.messages).toEqual([{ role: "user", content: "" }]);
+    // no text, no tool_results => still emits the user turn so the images have a carrier
+    expect(ir.messages).toEqual([
+      { role: "user", content: "", images: [{ url: "data:image/png;base64,abc", media_type: "image/png" }] },
+    ]);
   });
 
-  it("drops image blocks but keeps text and tool_results", () => {
+  it("forwards image blocks alongside text and tool_results", () => {
     const ir = parseAnthropicRequest(
       base({
         messages: [
@@ -122,12 +124,16 @@ describe("parseAnthropicRequest", () => {
       }),
     );
     expect(ir.messages).toEqual([
-      { role: "user", content: "hi" },
+      {
+        role: "user",
+        content: "hi",
+        images: [{ url: "data:image/png;base64,abc", media_type: "image/png" }],
+      },
       { role: "tool", content: "ok", tool_call_id: "toolu_1" },
     ]);
   });
 
-  it("handles thinking in user array (joins thinking text)", () => {
+  it("preserves thinking in user array separately (not flattened into text)", () => {
     const ir = parseAnthropicRequest(
       base({
         messages: [
@@ -141,7 +147,7 @@ describe("parseAnthropicRequest", () => {
         ],
       }),
     );
-    expect(ir.messages).toEqual([{ role: "user", content: "a think" }]);
+    expect(ir.messages).toEqual([{ role: "user", content: "a", thinking: " think" }]);
   });
 
   it("drops redacted_thinking in user array", () => {
@@ -207,7 +213,7 @@ describe("parseAnthropicRequest", () => {
     expect(ir.messages).toEqual([{ role: "tool", content: "part1 part2", tool_call_id: "toolu_1" }]);
   });
 
-  it("preserves tool_result content with is_error flag (same content)", () => {
+  it("preserves tool_result is_error flag on the IR tool message", () => {
     const ir = parseAnthropicRequest(
       base({
         messages: [
@@ -222,7 +228,7 @@ describe("parseAnthropicRequest", () => {
       }),
     );
     expect(ir.messages).toEqual([
-      { role: "tool", content: "oops", tool_call_id: "toolu_1" },
+      { role: "tool", content: "oops", tool_call_id: "toolu_1", is_error: true },
       { role: "tool", content: "ok", tool_call_id: "toolu_2" },
     ]);
   });
@@ -279,7 +285,7 @@ describe("parseAnthropicRequest", () => {
     expect(ir.messages[0]!.tool_calls![1]!.function.arguments).toBe("{}");
   });
 
-  it("handles thinking in assistant array (joins thinking text)", () => {
+  it("preserves thinking in assistant array separately (not flattened into text)", () => {
     const ir = parseAnthropicRequest(
       base({
         messages: [
@@ -293,7 +299,8 @@ describe("parseAnthropicRequest", () => {
         ],
       }),
     );
-    expect(ir.messages[0]!.content).toBe("let me think answer");
+    expect(ir.messages[0]!.content).toBe("answer");
+    expect(ir.messages[0]!.thinking).toBe("let me think ");
   });
 
   it("drops redacted_thinking in assistant array", () => {
