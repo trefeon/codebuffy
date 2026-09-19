@@ -418,12 +418,14 @@ describe("POST /admin/credentials/export", () => {
     };
     expect(body.bundle.version).toBe(1);
     expect(body.bundle.credentials).toHaveLength(1);
-    expect(body.bundle.credentials[0].uid).toBe("uid-1");
+    const exported = body.bundle.credentials[0];
+    if (!exported) throw new Error("expected one credential in bundle");
+    expect(exported.uid).toBe("uid-1");
     // Encrypted at rest: no token material in the JSON body.
     expect(JSON.stringify(body)).not.toContain("access-uid-1");
     const key = loadEncryptionKey(keyB64);
     expect(key).not.toBeNull();
-    const plain = decrypt(body.bundle.credentials[0].packet, key as Buffer);
+    const plain = decrypt(exported.packet, key as Buffer);
     expect((JSON.parse(plain) as Credential).auth.accessToken).toBe("access-uid-1");
   });
 

@@ -3,7 +3,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
-import { Database } from "bun:sqlite";
 import { SqliteCredentialStore } from "../src/credentials/store";
 import { decrypt, isEncryptedPayload } from "../src/credentials/crypto";
 import { normalizePoolFile, type Credential } from "../src/credentials/types";
@@ -66,6 +65,7 @@ describe("buildExportBundle", () => {
     expect(typeof bundle.exportedAt).toBe("number");
     expect(bundle.credentials).toHaveLength(1);
     const [entry] = bundle.credentials;
+    if (!entry) throw new Error("expected one credential in bundle");
     expect(entry.uid).toBe("uid-1");
     expect(entry.label).toBe("label-uid-1");
     expect(entry.domain).toBe("www.codebuddy.cn");
@@ -104,35 +104,24 @@ describe("buildExportBundle", () => {
   });
 
   it("passes through existing encrypted_data instead of re-encrypting", () => {
-    const dir = tempDir();
-    dirs.push(dir);
-    const dbPath = path.join(dir, "creds.db");
     const key = randomBytes(32);
-    const store = new SqliteCredentialStore(dbPath, key);
+    const store = new SqliteCredentialStore(":memory:", key);
     stores.push(store);
     store.upsert(makeCredential("uid-1"));
 
-    const reader = new Database(dbPath);
-    const raw = reader
-      .prepare("SELECT encrypted_data FROM credentials WHERE uid = ?")
-      .get("uid-1") as { encrypted_data: string };
-    reader.close();
-    expect(typeof raw.encrypted_data).toBe("string");
-    const storedPacket = JSON.parse(raw.encrypted_data) as {
-      iv: string;
-      tag: string;
-      ciphertext: string;
-    };
+    const first = buildExportBundle(store, key);
+    const second = buildExportBundle(store, key);
 
-    const bundle = buildExportBundle(store, key);
-
-    expect(bundle.credentials).toHaveLength(1);
-    // Passthrough: identical ciphertext, not a fresh encryption.
-    expect(bundle.credentials[0].packet).toEqual({
-      iv: storedPacket.iv,
-      tag: storedPacket.tag,
-      ciphertext: storedPacket.ciphertext,
-    });
+    expect(first.credentials).toHaveLength(1);
+    const a = first.credentials[0];
+    const b = second.credentials[0];
+    if (!a || !b) throw new Error("expected one credential in bundle");
+    // Identical ciphertext across exports: passthrough of stored
+    // encrypted_data, not a fresh random-IV encryption.
+    expect(b.packet).toEqual(a.packet);
+    expect(isEncryptedPayload(a.packet)).toBe(true);
+    const plain = decrypt(a.packet, key);
+    expect((JSON.parse(plain) as Credential).uid).toBe("uid-1");
   });
 
   it("falls back to the store key when no explicit key is passed", () => {
@@ -143,7 +132,9 @@ describe("buildExportBundle", () => {
 
     const bundle = buildExportBundle(store);
     expect(bundle.credentials).toHaveLength(1);
-    const plain = decrypt(bundle.credentials[0].packet, key);
+    const single = bundle.credentials[0];
+    if (!single) throw new Error("expected one credential in bundle");
+    const plain = decrypt(single.packet, key);
     expect((JSON.parse(plain) as Credential).uid).toBe("uid-1");
   });
 
