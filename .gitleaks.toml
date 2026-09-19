@@ -3,5 +3,5 @@ useDefault = true
 
 [allowlist]
 description = "Synthetic SECRET-BODY canary in secret-safe-logs test is fake by construction"
-paths = ['''test/secret-safe-logs.test.ts''']
-regexes = ['''SECRET-BODY-[A-Z0-9-]+''']
+paths = ['''test/secret-safe-logs.test.ts''', '''test/codex-routes.test.ts''']
+regexes = ['''SECRET-BODY-[A-Z0-9-]+''', '''ck_(test|notarealkey)[A-Za-z0-9_]*''']

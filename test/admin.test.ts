@@ -12,6 +12,8 @@ import { isLoopback, parseAdminKeys, passkeyNotImplemented } from "../src/admin/
 import type { Credential } from "../src/credentials/types";
 import type { CredentialStore } from "../src/credentials/store";
 import type { Pool } from "../src/pool/types";
+import { randomBytes } from "node:crypto";
+import { decrypt, loadEncryptionKey } from "../src/credentials/crypto";
 function makeCredential(uid: string, overrides: Partial<Credential> = {}): Credential {
   const now = Date.now();
   const base: Credential = {
@@ -79,6 +81,7 @@ function buildAdminApp(opts: {
   pool?: { size: () => number; getState?: (uid: string) => string | undefined; getStats?: () => unknown };
   checkinScheduler?: { trigger: (uid: string) => Promise<unknown> } | null;
   useCreateApp?: boolean;
+  encryptionKey?: string;
 } = {}) {
   const baseConfig = loadConfig({}, () => null);
   // Build mutable config with admin keys (bypass freeze)
@@ -86,6 +89,7 @@ function buildAdminApp(opts: {
     ...baseConfig,
     adminKeys: opts.adminKeys !== undefined ? opts.adminKeys : ["admin-key-12345678"],
     downstreamApiKeys: opts.downstreamKeys !== undefined ? opts.downstreamKeys : [],
+    ...(opts.encryptionKey !== undefined ? { encryptionKey: opts.encryptionKey } : {}),
   };
   // Ensure required fields present
   (config as unknown as { port: number }).port = baseConfig.port;
@@ -385,5 +389,54 @@ describe("passkeyNotImplemented export", () => {
     app.post("/test", (c) => passkeyNotImplemented(c));
     const res = await app.request("/test", { method: "POST" });
     expect(res.status).toBe(501);
+  });
+});
+
+describe("POST /admin/credentials/export", () => {
+  it("200 with encrypted bundle when a key is configured", async () => {
+    const keyB64 = randomBytes(32).toString("base64");
+    const { app } = buildAdminApp({ creds: [makeCredential("uid-1")], encryptionKey: keyB64 });
+    const res = await app.request("/admin/credentials/export", {
+      method: "POST",
+      headers: { Authorization: "Bearer admin-key-12345678" },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      bundle: {
+        version: number;
+        exportedAt: number;
+        credentials: Array<{
+          uid: string;
+          label?: string;
+          domain: string;
+          apiBase: string;
+          consoleBase: string;
+          checkinEnabled: boolean;
+          packet: { iv: string; tag: string; ciphertext: string };
+        }>;
+      };
+    };
+    expect(body.bundle.version).toBe(1);
+    expect(body.bundle.credentials).toHaveLength(1);
+    const exported = body.bundle.credentials[0];
+    if (!exported) throw new Error("expected one credential in bundle");
+    expect(exported.uid).toBe("uid-1");
+    // Encrypted at rest: no token material in the JSON body.
+    expect(JSON.stringify(body)).not.toContain("access-uid-1");
+    const key = loadEncryptionKey(keyB64);
+    expect(key).not.toBeNull();
+    const plain = decrypt(exported.packet, key as Buffer);
+    expect((JSON.parse(plain) as Credential).auth.accessToken).toBe("access-uid-1");
+  });
+
+  it("400 when rows are plaintext and no key is configured", async () => {
+    const { app } = buildAdminApp({ creds: [makeCredential("uid-1")] });
+    const res = await app.request("/admin/credentials/export", {
+      method: "POST",
+      headers: { Authorization: "Bearer admin-key-12345678" },
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("EXPORT_NO_KEY");
   });
 });

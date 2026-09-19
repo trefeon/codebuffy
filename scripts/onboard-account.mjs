@@ -21,10 +21,14 @@
  *   --api-base <url>        backend API plane   (default: https://copilot.tencent.com)
  *   --console-base <url>    web console host    (default: https://www.codebuddy.cn)
  *   --out-dir <dir>         pool directory      (default: data/pool)
+ *
+ * Restore an encrypted export bundle (POST /admin/credentials/export):
+ *   node scripts/onboard-account.mjs import <bundle.json> [--out-dir <dir>]
+ * Key comes from CODEBUFFY_ENCRYPTION_KEY (same formats as the gateway).
  */
 
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createDecipheriv, createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -236,14 +240,14 @@ function matchCount(json) {
 
 // ---- pool persistence (atomic write; 0600 where honored) ---------------------
 
-function writePoolFile(session, accountInfo) {
+function writePoolFile(session, accountInfo, overrides = {}) {
   if (!accountInfo.uid) fail("cannot write pool file without a resolved uid");
   fs.mkdirSync(OUT_DIR, { recursive: true });
   const record = {
     version: 1,
-    label: LABEL,
-    domain: new URL(CONSOLE_BASE).hostname,
-    apiBase: API_BASE,
+    label: overrides.label ?? LABEL,
+    domain: overrides.domain ?? new URL(CONSOLE_BASE).hostname,
+    apiBase: overrides.apiBase ?? API_BASE,
     account: { uid: accountInfo.uid, enterpriseId: accountInfo.enterpriseId, nickname: accountInfo.nickname },
     auth: {
       accessToken: session.accessToken, refreshToken: session.refreshToken,
@@ -317,8 +321,99 @@ async function main() {
   ].join("\n"));
 }
 
+// ---- bundle import (cred-backup export bundles) -------------------------------
+// `import <bundle.json>` restores a version-1 export bundle into pool-dir files
+// in the normalizePoolFile shape. Packets are AES-256-GCM; the key comes from
+// CODEBUFFY_ENCRYPTION_KEY (hex 64 / base64 44 / raw 32-byte, same as the gateway).
+// Fail-closed: version mismatch, undecryptable packet, or missing token fields
+// abort with a non-zero exit — no partial/plaintext writes.
+
+function parseEncryptionKey(raw) {
+  if (raw === undefined || raw === null) return null;
+  const trimmed = String(raw).trim();
+  if (trimmed === "") return null;
+  if (/^[0-9a-fA-F]{64}$/.test(trimmed)) return Buffer.from(trimmed, "hex");
+  const normalized = trimmed.replace(/-/g, "+").replace(/_/g, "/");
+  if (/^[A-Za-z0-9+/]+={0,2}$/.test(normalized)) {
+    try {
+      const buf = Buffer.from(normalized, "base64");
+      if (buf.length === 32) return buf;
+    } catch {
+      // fall through to the raw-string check below
+    }
+  }
+  const buf = Buffer.from(trimmed, "utf8");
+  if (buf.length === 32) return buf;
+  fail("invalid CODEBUFFY_ENCRYPTION_KEY: expected 32 bytes as base64, hex, or a 32-byte string");
+}
+
+function decryptPacket(uid, packet, key) {
+  const tagB64 = packet.tag ?? packet.authTag;
+  if (typeof packet.iv !== "string" || typeof tagB64 !== "string" || typeof packet.ciphertext !== "string") {
+    fail(`bundle entry "${uid}" has an invalid packet (need base64 iv/tag/ciphertext)`);
+  }
+  const iv = Buffer.from(packet.iv, "base64");
+  const tag = Buffer.from(tagB64, "base64");
+  const ciphertext = Buffer.from(packet.ciphertext, "base64");
+  if (iv.length !== 12) fail(`bundle entry "${uid}" has an invalid iv (expected 12 bytes)`);
+  if (tag.length !== 16) fail(`bundle entry "${uid}" has an invalid auth tag (expected 16 bytes)`);
+  try {
+    const decipher = createDecipheriv("aes-256-gcm", key, iv);
+    decipher.setAuthTag(tag);
+    return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8");
+  } catch {
+    fail(`cannot decrypt bundle entry "${uid}" — wrong CODEBUFFY_ENCRYPTION_KEY?`);
+  }
+}
+
+async function importBundle(bundlePath) {
+  if (!bundlePath) fail("usage: onboard-account.mjs import <bundle.json> [--out-dir <dir>]");
+  let bundle;
+  try {
+    bundle = JSON.parse(fs.readFileSync(bundlePath, "utf8"));
+  } catch (e) {
+    fail(`cannot read bundle ${bundlePath}: ${e.message}`);
+  }
+  if (!bundle || typeof bundle !== "object" || bundle.version !== 1) {
+    fail(`unsupported bundle version ${bundle?.version ?? "(missing)"}: expected version 1`);
+  }
+  if (!Array.isArray(bundle.credentials)) fail("invalid bundle: missing credentials array");
+  const key = parseEncryptionKey(process.env.CODEBUFFY_ENCRYPTION_KEY);
+  if (!key) fail("CODEBUFFY_ENCRYPTION_KEY is required to import an encrypted bundle");
+  let imported = 0;
+  for (const entry of bundle.credentials) {
+    const uid = entry?.uid;
+    if (typeof uid !== "string" || uid === "") fail("invalid bundle: entry without uid");
+    if (!entry.packet || typeof entry.packet !== "object") fail(`bundle entry "${uid}" is missing its packet`);
+    const plain = decryptPacket(uid, entry.packet, key);
+    let cred;
+    try {
+      cred = JSON.parse(plain);
+    } catch {
+      fail(`bundle entry "${uid}" decrypted to invalid JSON`);
+    }
+    if (typeof cred?.auth?.accessToken !== "string" || cred.auth.accessToken === "") {
+      fail(`bundle entry "${uid}": missing required field accessToken`);
+    }
+    if (typeof cred?.auth?.refreshToken !== "string" || cred.auth.refreshToken === "") {
+      fail(`bundle entry "${uid}": missing required field refreshToken`);
+    }
+    writePoolFile(
+      { ...cred.auth, ...(cred.apiKey ? { apiKey: cred.apiKey } : {}) },
+      { uid, enterpriseId: cred.enterpriseId, nickname: cred.nickname },
+      { label: entry.label, domain: entry.domain, apiBase: entry.apiBase },
+    );
+    imported++;
+  }
+  say(`imported ${imported} credential(s) to ${OUT_DIR}`);
+}
+
 function mask(secret) {
   return secret ? `${secret.slice(0, 12)}…(${secret.length} chars)` : "(none)";
 }
 
-main().catch((e) => fail(e.stack ?? String(e)));
+if (process.argv[2] === "import") {
+  importBundle(process.argv[3]).catch((e) => fail(e.stack ?? String(e)));
+} else {
+  main().catch((e) => fail(e.stack ?? String(e)));
+}
