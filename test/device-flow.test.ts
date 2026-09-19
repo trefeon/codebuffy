@@ -88,11 +88,11 @@ describe("startDeviceFlow", () => {
     expect(start).toEqual({ state: "S1", authUrl: "https://auth/cn", intervalSec: 5 });
   });
 
-  it("targets the intl base/host with identical fingerprint", async () => {
+  it("targets the intl base/host with ide platform and identical UA", async () => {
     const fake = makeFetch([{ json: { code: 0, data: { state: "S2", authUrl: "https://auth/intl" } } }]);
     await startDeviceFlow("intl", { fetchImpl: fake.fetchImpl });
     const call = fake.calls[0]!;
-    expect(call.url).toBe("https://www.codebuddy.ai/v2/plugin/auth/state?platform=CLI");
+    expect(call.url).toBe("https://www.codebuddy.ai/v2/plugin/auth/state?platform=ide");
     expect(call.headers).toEqual({ ...CN_START_HEADERS, "X-Domain": "www.codebuddy.ai" });
   });
 
