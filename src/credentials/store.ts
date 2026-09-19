@@ -72,6 +72,20 @@ export class SqliteCredentialStore implements CredentialStore {
     return this.encryptionKey;
   }
 
+  /**
+   * Fail-closed read-path probe (G3): true when the DB holds at least one row
+   * with encrypted_data set. Startup refuses to boot without a key in that
+   * case; plaintext legacy rows (data column only) still migrate normally.
+   */
+  hasEncryptedRows(): boolean {
+    const row = this.db
+      .prepare(
+        "SELECT 1 AS one FROM credentials WHERE encrypted_data IS NOT NULL AND encrypted_data != '' LIMIT 1",
+      )
+      .get() as { one: number } | undefined;
+    return row !== undefined;
+  }
+
   upsert(cred: Credential): void {
     const expiresAt = cred.auth.expiresAt;
     const label = cred.label ?? null;
