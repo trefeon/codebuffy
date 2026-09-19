@@ -21,6 +21,7 @@ import {
 import { randomBytes } from "node:crypto";
 import { pushFromUpstreamChunk } from "../observability/usage";
 import { ensureLeadingSystem } from "../ir/ensure-leading-system";
+import { siteForBase } from "../models/catalog";
 
 function generateId(prefix = "resp"): string {
   const sep = prefix.endsWith("_") || prefix.endsWith("-") ? "" : "_";
@@ -120,6 +121,7 @@ export function mountResponsesRoutes(app: Hono, deps: ResponsesDeps): void {
       return c.json({ error: { message: "No credentials available", type: "api_error" } }, 503);
     }
 
+    projected = ensureLeadingSystem(projected, siteForBase(cred.apiBase)); // post-pick: CN no-op, intl contract
     const upstreamReq = toUpstreamRequest(projected);
 
     const signal: AbortSignal | undefined =

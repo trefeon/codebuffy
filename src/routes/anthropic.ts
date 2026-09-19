@@ -19,6 +19,7 @@ import {
 import { randomBytes } from "node:crypto";
 import { pushFromUpstreamChunk } from "../observability/usage";
 import { ensureLeadingSystem } from "../ir/ensure-leading-system";
+import { siteForBase } from "../models/catalog";
 
 function generateId(prefix = "msg"): string {
   const sep = prefix.endsWith("_") || prefix.endsWith("-") ? "" : "_";
@@ -127,6 +128,7 @@ export function mountAnthropicRoutes(app: Hono, deps: AnthropicDeps): void {
       );
     }
 
+    ir = ensureLeadingSystem(ir, siteForBase(cred.apiBase)); // post-pick: CN no-op, intl contract
     const upstreamReq = toUpstreamRequest(ir);
 
     const signal: AbortSignal | undefined =

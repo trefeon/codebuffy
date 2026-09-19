@@ -112,6 +112,7 @@ export function mountOpenAIRoutes(app: Hono, deps: OpenAIDeps): void {
       return c.json({ error: { message: "No credentials available", type: "server_error", param: null, code: "no_credentials" } }, 503);
     }
 
+    ir = ensureLeadingSystem(ir, siteForBase(cred.apiBase)); // post-pick: CN no-op, intl contract
     const upstreamReq = toUpstreamRequest(ir);
 
     const signal: AbortSignal | undefined =
