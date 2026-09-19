@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { SqliteCredentialStore } from "../src/credentials/store";
 import { decrypt, isEncryptedPayload } from "../src/credentials/crypto";
 import { normalizePoolFile, type Credential } from "../src/credentials/types";
@@ -153,7 +154,7 @@ describe("buildExportBundle", () => {
     fs.writeFileSync(bundlePath, JSON.stringify(bundle));
 
     const poolDir = path.join(dir, "pool");
-    const script = path.join(process.cwd(), "scripts", "onboard-account.mjs");
+    const script = fileURLToPath(new URL("../scripts/onboard-account.mjs", import.meta.url));
     const proc = Bun.spawnSync([process.execPath, script, "import", bundlePath, "--out-dir", poolDir], {
       env: { ...process.env, CODEBUFFY_ENCRYPTION_KEY: keyB64 },
     });
@@ -177,7 +178,7 @@ describe("buildExportBundle", () => {
     const bundlePath = path.join(dir, "bundle.json");
     fs.writeFileSync(bundlePath, JSON.stringify({ version: 999, exportedAt: Date.now(), credentials: [] }));
 
-    const script = path.join(process.cwd(), "scripts", "onboard-account.mjs");
+    const script = fileURLToPath(new URL("../scripts/onboard-account.mjs", import.meta.url));
     const proc = Bun.spawnSync([process.execPath, script, "import", bundlePath, "--out-dir", path.join(dir, "pool")], {
       env: { ...process.env, CODEBUFFY_ENCRYPTION_KEY: randomBytes(32).toString("base64") },
     });
