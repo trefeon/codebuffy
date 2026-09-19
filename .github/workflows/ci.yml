@@ -35,7 +35,8 @@ jobs:
         with:
           bun-version-file: .bun-version
       - run: bun install --frozen-lockfile
-      # Advisory until the bunfig.toml coverage threshold is met: `|| true`
-      # keeps the lane green while the gap is closed. Flip to a hard gate
-      # (drop `|| true`) once `bun run coverage` passes at threshold.
+      # Advisory: coverage is report-only (no bunfig threshold — bun 1.4.2
+      # enforces per-file, unmeetable at current tracing/usage-quota levels).
+      # `|| true` keeps CI green; re-add a threshold + hard gate once
+      # per-file coverage is raised to an honest floor.
       - run: bun run coverage || true
