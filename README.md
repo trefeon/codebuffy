@@ -32,13 +32,13 @@ docker compose up --build   # containerized
 | `src/observability/` | Prometheus (`metrics.ts`, `middleware.ts`), request usage log (`usage.ts`), OTel spans (`tracing.ts`, no-op without endpoint) |
 | `src/middleware/` | `downstream-auth.ts`, `admin-auth.ts` |
 | `src/logger.ts`, `src/shutdown.ts` | pino factory with secret redaction; SIGINT/SIGTERM handling |
-| `test/` | `bun:test` suites — 621 tests across 29 files (run via `bun run test`) |
+| `test/` | `bun:test` suites — 624 tests across 30 files (run via `bun run test`) |
 | `scripts/` | Operator tooling (`onboard-account.mjs`, `run-tests.mjs`) |
 
 Configuration is layered `defaults < config.json < env (CODEBUFFY_*)`; 21 keys (`src/config.ts:79-101`): `CODEBUFFY_PORT`, `CODEBUFFY_HOST`, `CODEBUFFY_LOG_LEVEL`, `CODEBUFFY_API_BASE`, `CODEBUFFY_CONSOLE_BASE`, `CODEBUFFY_DB_PATH`, `CODEBUFFY_UPSTREAM_TIMEOUT_MS`, `CODEBUFFY_API_KEYS`, `CODEBUFFY_POOL_COOLDOWN_MS`, `CODEBUFFY_BREAKER_THRESHOLD`, `CODEBUFFY_BREAKER_RESET_MS`, `CODEBUFFY_CACHE_AFFINITY_TTL_MS`, `CODEBUFFY_METRICS_ENABLED`, `CODEBUFFY_ADMIN_ENABLED`, `CODEBUFFY_ADMIN_KEYS`, `CODEBUFFY_CHECKIN_ENABLED`, `CODEBUFFY_CHECKIN_JITTER_MS`, `CODEBUFFY_ENCRYPTION_KEY`, `CODEBUFFY_UPSTREAM_CLI_VERSION`, `CODEBUFFY_UPSTREAM_CLIENT_VERSION`, `CODEBUFFY_INTL_PLATFORM`.
 
 ## Status
 
-M5-core + post-core complete and verified (typecheck + lint + `bun run test` green: 621 tests / 29 files). Shipped: OpenAI Chat, Anthropic Messages, and Responses dialects; hardened pool (state machine, cache affinity, circuit breaker); encrypted SQLite credential store (AES-256-GCM); device-flow login (`POST /admin/credentials/device-flow/start|poll`); admin API + static UI (`GET /admin/`, usage/quota pages); Prometheus `/metrics` + deep `/readyz`; opt-in daily check-in (`CODEBUFFY_CHECKIN_ENABLED`, default off). Remaining: WebAuthn/passkey real impl (endpoint is a 501 stub).
+M5-core + post-core complete and verified (typecheck + lint + `bun run test` green: 624 tests / 30 files). Shipped: OpenAI Chat, Anthropic Messages, and Responses dialects; hardened pool (state machine, cache affinity, circuit breaker); encrypted SQLite credential store (AES-256-GCM); device-flow login (`POST /admin/credentials/device-flow/start|poll`); admin API + static UI (`GET /admin/`, usage/quota pages); Prometheus `/metrics` + deep `/readyz`; opt-in daily check-in (`CODEBUFFY_CHECKIN_ENABLED`, default off). Remaining: WebAuthn/passkey real impl (endpoint is a 501 stub).
 
 > `reference/`, `research/`, and `devdocs/` are private working directories (git-ignored): prior-art clones, the full reverse-engineering study, and development-process docs. They are intentionally not part of this repository.
