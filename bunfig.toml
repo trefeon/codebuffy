@@ -1,0 +1,4 @@
+# G7 coverage gate: thresholds enforced by `bun test --coverage` (see `bun run coverage`).
+# The CI coverage-gate job stays advisory (`|| true`) until the suite meets these.
+[test]
+coverageThreshold = { lines = 0.8, functions = 0.8, statements = 0.8 }

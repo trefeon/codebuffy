@@ -32,12 +32,57 @@ export interface AppDeps {
   checkinScheduler?: CheckinSchedulerLike | null;
 }
 
+// ---- G10 provider registry (additive; existing mount callsites unchanged) ----
+
+export interface DialectEntry {
+  dialect: string;
+  routes: string[];
+}
+
+/** Every downstream dialect the gateway serves and the routes each one owns. */
+export const PROVIDER_REGISTRY: DialectEntry[] = [
+  { dialect: "openai", routes: ["/v1/chat/completions", "/v1/models"] },
+  { dialect: "anthropic", routes: ["/v1/messages"] },
+  { dialect: "responses", routes: ["/v1/responses"] },
+];
+
+/** Dialects actually mounted for these deps (pool+upstream gate the /v1 plane). */
+export function getMountedDialects(deps: AppDeps): DialectEntry[] {
+  return deps.pool && deps.upstream ? PROVIDER_REGISTRY : [];
+}
+
+/**
+ * G10: assert every mounted dialect has an executor at startup — logs the
+ * registry and throws otherwise so a half-wired provider plane can never
+ * serve. All three dialects execute through the shared upstream client, so
+ * the executor check is `upstream.streamChat` presence.
+ */
+export function assertProviderRegistry(deps: AppDeps): string[] {
+  const mounted = getMountedDialects(deps);
+  if (mounted.length === 0) {
+    deps.logger.info("provider registry: no dialects mounted (pool/upstream absent)");
+    return [];
+  }
+  const upstream = deps.upstream as unknown as { streamChat?: unknown } | undefined;
+  if (!upstream || typeof upstream.streamChat !== "function") {
+    const names = mounted.map((d) => d.dialect);
+    deps.logger.error({ missing: names }, "provider registry: mounted dialect(s) without executor");
+    throw new Error(`provider registry: mounted dialect(s) without executor: ${names.join(", ")}`);
+  }
+  const names = mounted.map((d) => d.dialect);
+  deps.logger.info({ dialects: names }, "provider registry ready");
+  return names;
+}
+
 /**
  * Factory (not a singleton) so tests can build isolated instances —
  * the create_app pattern identified as best-in-class in research/04 §3.
  */
 export function createApp(deps: AppDeps): Hono {
   const app = new Hono();
+
+  // G10: fail closed when a mounted dialect has no executor.
+  assertProviderRegistry(deps);
 
   // Admin UI static — serve before auth so HTML loads without key, JS will prompt for key
   app.get("/admin/", async (c) => {

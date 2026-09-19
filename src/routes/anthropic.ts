@@ -287,9 +287,25 @@ export function mountAnthropicRoutes(app: Hono, deps: AnthropicDeps): void {
       );
     }
 
+    // Local word-boundary estimate — NEVER an upstream call. Counting is a
+    // pure function of the request body: no credentials, no network, no
+    // side effects. `detail: "heuristic"` tells clients the number is a
+    // rough word-level estimate, not a tokenizer count.
+    const IMAGE_TOKEN_ALLOWANCE = 1000;
+    const estimateWordBoundaryTokens = (text: string): number => {
+      const trimmed = text.trim();
+      if (!trimmed) return 0;
+      // Words (letters/digits, incl. contractions) count 1; each CJK
+      // character, punctuation mark, or symbol counts 1. Approximates
+      // per-word billing granularity; BPE would split long words further.
+      const segments = trimmed.match(/[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)?|[^\s\p{L}\p{N}]/gu);
+      return segments === null ? 0 : segments.length;
+    };
+
     try {
       const r = raw as Record<string, unknown>;
       let text = "";
+      let imageBlocks = 0;
       const sys = r.system;
       if (typeof sys === "string") text += sys + " ";
       else if (Array.isArray(sys)) {
@@ -307,6 +323,10 @@ export function mountAnthropicRoutes(app: Hono, deps: AnthropicDeps): void {
               if (b?.type === "text" && typeof b.text === "string") text += b.text + " ";
               else if (b?.type === "thinking" && typeof (b as { thinking?: string }).thinking === "string") {
                 text += (b as { thinking: string }).thinking + " ";
+              } else if (b?.type === "image" || b?.type === "image_url") {
+                // Billed by size upstream; without image dimensions a flat
+                // documented allowance is the honest local approximation.
+                imageBlocks++;
               } else if (b?.type === "tool_result") {
                 const tr = b as { content?: unknown };
                 if (typeof tr.content === "string") text += tr.content + " ";
@@ -326,8 +346,8 @@ export function mountAnthropicRoutes(app: Hono, deps: AnthropicDeps): void {
           if (typeof t.description === "string") text += t.description + " ";
         }
       }
-      const tokens = text.trim() ? text.trim().split(/\s+/).length : 0;
-      return c.json({ input_tokens: tokens });
+      const tokens = estimateWordBoundaryTokens(text) + imageBlocks * IMAGE_TOKEN_ALLOWANCE;
+      return c.json({ input_tokens: tokens, detail: "heuristic" });
     } catch {
       return c.json(
         { type: "error", error: { type: "invalid_request_error", message: "count_tokens not implemented" } },

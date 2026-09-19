@@ -7,6 +7,54 @@ import { StateMachine, CredentialState } from "./state";
 import { CacheAffinity } from "./affinity";
 import { CircuitBreaker } from "./breaker";
 import { UpstreamError, isRetryable } from "../upstream/errors";
+import { incUpstreamErrorsTotal } from "../observability/metrics";
+
+// ---- G6 admission control (additive; pick()/report* paths untouched) ----
+// TODO(Lane A): promote these to src/config.ts knobs (e.g. poolMaxInflight /
+// poolMaxQueue) once Lane A lands config keys; hardcoded conservative defaults here.
+export const DEFAULT_MAX_INFLIGHT = 64;
+export const DEFAULT_MAX_QUEUE = 128;
+export const DEFAULT_ADMISSION_RETRY_AFTER_SECONDS = 1;
+
+export interface AdmissionOptions {
+  maxInflight?: number;
+  maxQueue?: number;
+  retryAfterSeconds?: number;
+}
+
+export interface AdmissionStats {
+  inflight: number;
+  queued: number;
+  maxInflight: number;
+  maxQueue: number;
+}
+
+/**
+ * Thrown when both the in-flight cap and the bounded queue are saturated.
+ * Carries its HTTP mapping (503 + Retry-After) so route layers can translate
+ * it without importing HTTP types into the pool.
+ */
+export class AdmissionRejectedError extends Error {
+  readonly status = 503;
+  readonly code = "ADMISSION_SATURATED";
+  readonly retryAfter: number;
+
+  constructor(retryAfter: number = DEFAULT_ADMISSION_RETRY_AFTER_SECONDS) {
+    super("server saturated: admission queue full");
+    this.name = "AdmissionRejectedError";
+    this.retryAfter = retryAfter;
+  }
+
+  toHeaders(): Record<string, string> {
+    return { "Retry-After": String(this.retryAfter) };
+  }
+
+  toJSON(): unknown {
+    return {
+      error: { message: this.message, type: "server_error", code: this.code },
+    };
+  }
+}
 
 export interface RoundRobinPoolOptions {
   stateMachine?: StateMachine;
@@ -16,6 +64,8 @@ export interface RoundRobinPoolOptions {
   breakerThreshold?: number;
   breakerResetMs?: number;
   affinityTtlMs?: number;
+  /** G6 admission control overrides; conservative in-module defaults apply when omitted. */
+  admission?: AdmissionOptions;
 }
 
 export interface PickOptions {
@@ -59,6 +109,11 @@ export class RoundRobinPool implements Pool {
   private readonly stateMachine: StateMachine;
   private readonly affinity: CacheAffinity;
   private readonly breaker: CircuitBreaker;
+  private readonly maxInflight: number;
+  private readonly maxQueue: number;
+  private readonly admissionRetryAfter: number;
+  private inflight = 0;
+  private readonly admissionWaiters: Array<() => void> = [];
 
   constructor(
     private readonly store: SqliteCredentialStore,
@@ -84,6 +139,16 @@ export class RoundRobinPool implements Pool {
         threshold: options.breakerThreshold ?? 5,
         resetMs: options.breakerResetMs ?? 60_000,
       });
+    const admission = options.admission ?? {};
+    const rawInflight = admission.maxInflight ?? DEFAULT_MAX_INFLIGHT;
+    const rawQueue = admission.maxQueue ?? DEFAULT_MAX_QUEUE;
+    this.maxInflight = Number.isFinite(rawInflight)
+      ? Math.max(1, Math.floor(rawInflight))
+      : DEFAULT_MAX_INFLIGHT;
+    this.maxQueue = Number.isFinite(rawQueue)
+      ? Math.max(0, Math.floor(rawQueue))
+      : DEFAULT_MAX_QUEUE;
+    this.admissionRetryAfter = admission.retryAfterSeconds ?? DEFAULT_ADMISSION_RETRY_AFTER_SECONDS;
   }
 
   // Overload maintains backward compatibility: Pool interface declares pick() with no args.
@@ -214,6 +279,75 @@ export class RoundRobinPool implements Pool {
       counts[state] = (counts[state] ?? 0) + 1;
     }
     return counts;
+  }
+
+  /**
+   * G6 admission control — bounded fair semaphore guarding concurrent upstream
+   * work. Fast path grants immediately; overflow waits FIFO up to maxQueue;
+   * beyond that throws AdmissionRejectedError (503 + Retry-After) and counts
+   * the rejection in upstream_errors_total as code admission_saturated.
+   */
+  getAdmissionStats(): AdmissionStats {
+    return {
+      inflight: this.inflight,
+      queued: this.admissionWaiters.length,
+      maxInflight: this.maxInflight,
+      maxQueue: this.maxQueue,
+    };
+  }
+
+  async acquireAdmission(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) {
+      throw signal.reason ?? new DOMException("Aborted", "AbortError");
+    }
+    if (this.inflight < this.maxInflight && this.admissionWaiters.length === 0) {
+      this.inflight += 1;
+      return;
+    }
+    if (this.admissionWaiters.length >= this.maxQueue) {
+      incUpstreamErrorsTotal("admission_saturated");
+      throw new AdmissionRejectedError(this.admissionRetryAfter);
+    }
+    const { promise, resolve, reject } = Promise.withResolvers<void>();
+    let settled = false;
+    const grant = (): void => {
+      if (settled) return;
+      settled = true;
+      this.inflight += 1;
+      resolve();
+    };
+    this.admissionWaiters.push(grant);
+    const onAbort = (): void => {
+      if (settled) return;
+      const at = this.admissionWaiters.indexOf(grant);
+      if (at === -1) return;
+      settled = true;
+      this.admissionWaiters.splice(at, 1);
+      reject(signal?.reason ?? new DOMException("Aborted", "AbortError"));
+    };
+    if (signal) signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      await promise;
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+    }
+  }
+
+  releaseAdmission(): void {
+    if (this.inflight > 0) this.inflight -= 1;
+    const next = this.admissionWaiters.shift();
+    // Slot transfers directly to the longest waiter: the decrement above is
+    // immediately re-granted, so inflight is unchanged while queued work waits.
+    if (next) next();
+  }
+
+  async withAdmission<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    await this.acquireAdmission(signal);
+    try {
+      return await fn();
+    } finally {
+      this.releaseAdmission();
+    }
   }
 
   /** Expose internals for tests / observability */
