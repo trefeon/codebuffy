@@ -8,6 +8,8 @@ import { listUsage } from "../observability/usage";
 import { fetchUsageQuota, QuotaError } from "../upstream/usage-quota";
 import { credentialFromDeviceFlow, pollDeviceFlow, startDeviceFlow } from "../credentials/device-flow";
 import type { DeviceFlowDomain } from "../credentials/device-flow";
+import { buildExportBundle, ExportError } from "../credentials/export";
+import { loadEncryptionKey } from "../credentials/crypto";
 
 export interface CheckinSchedulerLike {
   trigger(uid: string): Promise<unknown>;
@@ -88,6 +90,26 @@ export function mountAdminRoutes(app: Hono, deps: MountAdminDeps): void {
     store.delete(uid);
     logger.info({ uid }, "admin deleted credential");
     return c.json({ ok: true, uid });
+  });
+  // POST /admin/credentials/export — encrypted backup bundle (JSON body;
+  // file download left to the operator). Auth via adminAuth in src/app.ts.
+  app.post("/admin/credentials/export", (c) => {
+    if (!store) return c.json({ error: { code: "UNAVAILABLE", message: "store not configured" } }, 503);
+    let key: Buffer | null = null;
+    try {
+      key = loadEncryptionKey(deps.config.encryptionKey);
+    } catch (err) {
+      return c.json({ error: { code: "BAD_KEY", message: (err as Error).message } }, 400);
+    }
+    try {
+      const bundle = buildExportBundle(store, key);
+      return c.json({ bundle });
+    } catch (err) {
+      if (err instanceof ExportError) {
+        return c.json({ error: { code: "EXPORT_NO_KEY", message: err.message } }, 400);
+      }
+      throw err;
+    }
   });
 
   // GET /admin/pool/state — pool.getStats + by-uid state if available
