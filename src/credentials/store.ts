@@ -82,8 +82,9 @@ export class SqliteCredentialStore implements CredentialStore {
       .prepare(
         "SELECT 1 AS one FROM credentials WHERE encrypted_data IS NOT NULL AND encrypted_data != '' LIMIT 1",
       )
-      .get() as { one: number } | undefined;
-    return row !== undefined;
+      .get() as { one: number } | null | undefined;
+    // bun:sqlite returns null (not undefined) when no row matches.
+    return row !== undefined && row !== null;
   }
 
   upsert(cred: Credential): void {

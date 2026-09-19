@@ -334,13 +334,11 @@ export class RoundRobinPool implements Pool {
   }
 
   releaseAdmission(): void {
-    const next = this.admissionWaiters.shift();
-    if (next) {
-      // Slot transfers directly to the longest waiter; inflight unchanged.
-      next();
-      return;
-    }
     if (this.inflight > 0) this.inflight -= 1;
+    const next = this.admissionWaiters.shift();
+    // Slot transfers directly to the longest waiter: the decrement above is
+    // immediately re-granted, so inflight is unchanged while queued work waits.
+    if (next) next();
   }
 
   async withAdmission<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
