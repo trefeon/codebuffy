@@ -7,20 +7,32 @@ import type { Credential } from "../credentials/types";
 import { siteForBase } from "../models/catalog";
 
 /**
- * Fingerprint UA mandated by research/02 §4 (dsh CLI identity). Versions follow
- * the config keys upstreamCliVersion / upstreamClientVersion (defaults below);
- * operators may override via CODEBUFFY_UPSTREAM_*_VERSION env.
+ * Fingerprint UA mandated by research/02 §4 (dsh CLI identity). Default
+ * versions follow the config keys upstreamCliVersion / upstreamClientVersion;
+ * operators may override via CODEBUFFY_UPSTREAM_*_VERSION env, which reaches
+ * the wire through the versions param of buildUpstreamHeaders (never the
+ * import-time const below — it is only the compiled-in default).
  */
 export const FINGERPRINT_UA = `CLI/${UPSTREAM_CLI_VERSION_DEFAULT} CodeBuddy/${UPSTREAM_CLIENT_VERSION_DEFAULT}`;
 
 /** Per-site IDE identity (9router codebuddy-cn.js:28-34 / codebuddy-intl.js:28-35). */
-function ideIdentity(site: "cn" | "intl"): { ua: string; ide: string } {
+function ideIdentity(
+  site: "cn" | "intl",
+  cliVersion: string = UPSTREAM_CLI_VERSION_DEFAULT,
+  clientVersion: string = UPSTREAM_CLIENT_VERSION_DEFAULT,
+): { ua: string; ide: string } {
   return site === "intl"
     ? {
-      ua: `IDE/${UPSTREAM_CLI_VERSION_DEFAULT} CodeBuddy/${UPSTREAM_CLIENT_VERSION_DEFAULT}`,
+      ua: `IDE/${cliVersion} CodeBuddy/${clientVersion}`,
       ide: "IDE",
     }
-  : { ua: FINGERPRINT_UA, ide: "CLI" };
+  : { ua: `CLI/${cliVersion} CodeBuddy/${clientVersion}`, ide: "CLI" };
+}
+
+/** Live config versions threaded from Config (UpstreamClient/RefreshService pass these). */
+export interface UpstreamVersions {
+  cliVersion?: string;
+  clientVersion?: string;
 }
 
 /**
@@ -41,9 +53,13 @@ function ideIdentity(site: "cn" | "intl"): { ua: string; ide: string } {
  */
 export function buildUpstreamHeaders(
   credential: Credential,
-  opts?: { refreshToken?: string; requestId?: string },
+  opts?: { refreshToken?: string; requestId?: string } & UpstreamVersions,
 ): Record<string, string> {
-  const { ua, ide } = ideIdentity(siteForBase(credential.apiBase));
+  const { ua, ide } = ideIdentity(
+    siteForBase(credential.apiBase),
+    opts?.cliVersion ?? UPSTREAM_CLI_VERSION_DEFAULT,
+    opts?.clientVersion ?? UPSTREAM_CLIENT_VERSION_DEFAULT,
+  );
   const headers: Record<string, string> = {
     Authorization: `Bearer ${credential.auth.accessToken}`,
     "X-Product": "SaaS",

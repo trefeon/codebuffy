@@ -6,7 +6,8 @@ import type { Logger } from "../logger";
 import type { Pool } from "../pool/types";
 import type { UpstreamClient } from "../upstream/client";
 import type { Credential } from "../credentials/types";
-import { UpstreamError } from "../upstream/errors";
+import { UpstreamError, upstreamLogFields } from "../upstream/errors";
+import { AdmissionRejectedError } from "../pool/round-robin";
 import { parseResponsesRequest } from "../adapters/responses/parser";
 import { ParseError } from "../ir/types";
 import { projectIRRequest } from "../adapters/responses/projection";
@@ -86,8 +87,6 @@ export function mountResponsesRoutes(app: Hono, deps: ResponsesDeps): void {
       }
       throw e;
     }
-    ir = ensureLeadingSystem(ir);
-
     // projection handling
     const bodyRec = raw as Record<string, unknown>;
     const queryDry = c.req.query("dry_run") ?? c.req.query("dryRun");
@@ -116,8 +115,26 @@ export function mountResponsesRoutes(app: Hono, deps: ResponsesDeps): void {
 
     const isStream = ir.stream === true;
 
+    // G6 admission gate (see openai.ts): saturated pool → 503 + Retry-After.
+    try {
+      await pool.acquireAdmission?.();
+    } catch (err) {
+      if (err instanceof AdmissionRejectedError) {
+        return c.json({ error: { message: err.message, type: "api_error", code: err.code } }, 503, {
+          "Retry-After": String(err.retryAfter),
+        });
+      }
+      throw err;
+    }
+    let admitted = true;
+    const releaseAdmissionOnce = (): void => {
+      if (!admitted) return;
+      admitted = false;
+      pool.releaseAdmission?.();
+    };
     const cred = await pool.pick();
     if (!cred) {
+      releaseAdmissionOnce();
       return c.json({ error: { message: "No credentials available", type: "api_error" } }, 503);
     }
 
@@ -151,7 +168,7 @@ export function mountResponsesRoutes(app: Hono, deps: ResponsesDeps): void {
       try {
         activeCred = await deps.refresh.refreshNow(activeCred.uid);
       } catch (refreshErr) {
-        logger.warn({ err: refreshErr, uid: activeCred.uid }, "live auth refresh failed; keeping original error");
+        logger.warn({ ...upstreamLogFields(refreshErr), uid: activeCred.uid }, "live auth refresh failed; keeping original error");
         return false;
       }
       chunks = upstream.streamChat(upstreamReq, activeCred, signal);
@@ -160,6 +177,7 @@ export function mountResponsesRoutes(app: Hono, deps: ResponsesDeps): void {
 
     if (isStream) {
       return streamSSE(c, async (stream) => {
+        try {
         let lastId: string | undefined;
         let lastUsage: unknown;
         let emitted = false;
@@ -195,14 +213,18 @@ export function mountResponsesRoutes(app: Hono, deps: ResponsesDeps): void {
               const mapped = mapUpstreamErrorToHttp(err);
               await stream.write(formatResponsesSSE({ type: "error", error: mapped.body }));
             } else {
-              logger.error({ err }, "stream responses failed");
+              logger.error(upstreamLogFields(err), "stream responses failed");
               await stream.write(formatResponsesSSE({ type: "error", error: { message: "upstream stream failed", type: "api_error" } }));
             }
             break;
           }
         }
+        } finally {
+          releaseAdmissionOnce();
+        }
       });
     } else {
+      try {
       const id = generateId("resp");
       const created = Math.floor(Date.now() / 1000);
       for (;;) {
@@ -250,9 +272,12 @@ export function mountResponsesRoutes(app: Hono, deps: ResponsesDeps): void {
             const mapped = mapUpstreamErrorToHttp(err);
             return c.json(mapped.body, mapped.status as never);
           }
-          logger.error({ err }, "responses failed");
+          logger.error(upstreamLogFields(err), "responses failed");
           return c.json({ error: { message: "upstream request failed", type: "api_error" } }, 502);
         }
+      }
+      } finally {
+        releaseAdmissionOnce();
       }
     }
   });

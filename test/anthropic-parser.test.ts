@@ -108,6 +108,27 @@ describe("parseAnthropicRequest", () => {
     ]);
   });
 
+  it("skips malformed image blocks (non-base64 / empty data), parsing the rest", () => {
+    const ir = parseAnthropicRequest(
+      base({
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "hi" },
+              { type: "image", source: { type: "url", url: "https://example.com/x.png" } },
+              { type: "image", source: { type: "base64", media_type: "image/png", data: "" } },
+              { type: "image", source: { type: "base64", media_type: "image/png", data: "abc" } },
+            ],
+          },
+        ],
+      }),
+    );
+    expect(ir.messages).toEqual([
+      { role: "user", content: "hi", images: [{ url: "data:image/png;base64,abc", media_type: "image/png" }] },
+    ]);
+  });
+
   it("forwards image blocks alongside text and tool_results", () => {
     const ir = parseAnthropicRequest(
       base({

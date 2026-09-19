@@ -61,7 +61,10 @@ export class UpstreamClient {
   async fetchModels(credential: Credential): Promise<unknown> {
     const base = (credential.apiBase || this.config.apiBase).replace(/\/+$/, "");
     const url = `${base}/v3/config`;
-    const headers = buildUpstreamHeaders(credential);
+    const headers = buildUpstreamHeaders(credential, {
+      cliVersion: this.config.upstreamCliVersion,
+      clientVersion: this.config.upstreamClientVersion,
+    });
     headers["Accept"] = "application/json";
 
     const signal = buildCompositeSignal(undefined, this.config.upstreamTimeoutMs);
@@ -129,7 +132,10 @@ export class UpstreamClient {
   ): AsyncIterable<UpstreamChunk> {
     const base = (credential.apiBase || this.config.apiBase).replace(/\/+$/, "");
     const url = `${base}/v2/chat/completions`;
-    const headers = buildUpstreamHeaders(credential);
+    const headers = buildUpstreamHeaders(credential, {
+      cliVersion: this.config.upstreamCliVersion,
+      clientVersion: this.config.upstreamClientVersion,
+    });
     headers["Content-Type"] = "application/json";
     headers["Accept"] = "text/event-stream";
     // Force stream:true upstream (stream-only backend)

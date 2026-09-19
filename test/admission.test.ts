@@ -15,7 +15,8 @@ import {
   RoundRobinPool,
 } from "../src/pool/round-robin";
 import type { AdmissionOptions } from "../src/pool/round-robin";
-import { assertProviderRegistry, getMountedDialects } from "../src/app";
+import { assertProviderRegistry, createApp, getMountedDialects } from "../src/app";
+import { loadConfig } from "../src/config";
 import type { AppDeps } from "../src/app";
 import { renderMetrics, reset } from "../src/observability/metrics";
 import { startSpan } from "../src/observability/tracing";
@@ -310,5 +311,50 @@ describe("G4 span helpers", () => {
     span.end({ code: 2, message: "boom" });
     span.end();
     expect(typeof span.end).toBe("function");
+  });
+});
+
+describe("route admission wiring", () => {
+  it("POST /v1/chat/completions maps a saturated pool to 503 + Retry-After without touching credentials", async () => {
+    const config = loadConfig({}, () => null);
+    let picks = 0;
+    let releases = 0;
+    const saturatedPool = {
+      pick: async () => {
+        picks++;
+        return makeCredential("uid-saturated");
+      },
+      size: () => 1,
+      acquireAdmission: async (): Promise<void> => {
+        throw new AdmissionRejectedError(1);
+      },
+      releaseAdmission: (): void => {
+        releases++;
+      },
+    };
+    const neverUpstream = {
+      streamChat: (): never => {
+        throw new Error("upstream must not be called when saturated");
+      },
+      fetchModels: async (): Promise<unknown> => [],
+    };
+    const app = createApp({
+      config,
+      logger: makeLogger(),
+      startedAt: Date.now(),
+      pool: saturatedPool as never,
+      upstream: neverUpstream as never,
+    });
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "auto", messages: [{ role: "user", content: "hi" }] }),
+    });
+    expect(res.status).toBe(503);
+    expect(res.headers.get("retry-after")).toBe("1");
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("ADMISSION_SATURATED");
+    expect(picks).toBe(0);
+    expect(releases).toBe(0);
   });
 });

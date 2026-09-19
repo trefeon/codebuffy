@@ -13,9 +13,10 @@ function boolFromEnv(val: unknown): unknown {
   return val;
 }
 
-/** Upstream fingerprint versions — single source of truth for UA builders. */
-export const UPSTREAM_CLI_VERSION_DEFAULT = "2.63.2";
-export const UPSTREAM_CLIENT_VERSION_DEFAULT = "2.63.2";
+/** Upstream fingerprint versions — single source of truth for chat-wire UA builders. */
+/** Chat-wire lineage per 9router registries (codebuddy-cn.js / codebuddy-intl.js). OAuth device-flow keeps its own DEVICE_OAUTH_UA. */
+export const UPSTREAM_CLI_VERSION_DEFAULT = "2.108.1";
+export const UPSTREAM_CLIENT_VERSION_DEFAULT = "2.108.1";
 export const INTL_PLATFORM_DEFAULT = "ide";
 const ConfigSchema = z.object({
   port: z.coerce.number().int().min(1).max(65535).default(3000),

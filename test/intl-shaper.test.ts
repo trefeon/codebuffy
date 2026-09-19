@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { ensureLeadingSystem } from "../src/ir/ensure-leading-system";
-import type { IRRequest } from "../src/ir/types";
+import { toUpstreamRequest, type IRRequest } from "../src/ir/types";
 
 function makeIR(messages: IRRequest["messages"]): IRRequest {
   return { model: "glm-5.2", messages, stream: false };
@@ -39,6 +39,24 @@ describe("ensureLeadingSystem intl shaper", () => {
       "intl",
     );
     expect(out.messages[2]).toEqual({ role: "assistant", content: "a" });
+  });
+
+  it("flattens typed blocks and appends image parts for user messages with images", () => {
+    const shaped = ensureLeadingSystem(
+      makeIR([{ role: "user", content: "see this", images: [{ url: "data:image/png;base64,AAA" }] }]),
+      "intl",
+    );
+    const req = toUpstreamRequest(shaped);
+    const content = (req.messages[1] as unknown as { content: unknown }).content as Array<{
+      type: string;
+      text?: unknown;
+      image_url?: unknown;
+    }>;
+    expect(content[0]).toEqual({ type: "text", text: "see this" });
+    expect(content[1]).toEqual({ type: "image_url", image_url: { url: "data:image/png;base64,AAA" } });
+    for (const part of content) {
+      expect(typeof part.text === "string" || part.text === undefined).toBe(true);
+    }
   });
 });
 

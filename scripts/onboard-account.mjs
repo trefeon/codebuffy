@@ -39,7 +39,7 @@ const VERIFY = flag("verify");
 const AUTH_FILE = opt("from-auth-file");
 const POOL_FILE = opt("pool-file");
 
-const UA = `CLI/${process.env.CODEBUFFY_UPSTREAM_CLI_VERSION ?? "2.63.2"} CodeBuddy/${process.env.CODEBUFFY_UPSTREAM_CLIENT_VERSION ?? "2.63.2"}`; // client fingerprint (config keys: upstreamCliVersion/upstreamClientVersion)
+const UA = `CLI/${process.env.CODEBUFFY_UPSTREAM_CLI_VERSION ?? "2.108.1"} CodeBuddy/${process.env.CODEBUFFY_UPSTREAM_CLIENT_VERSION ?? "2.108.1"}`; // client fingerprint (config keys: upstreamCliVersion/upstreamClientVersion)
 const POLL_INTERVAL_MS = 2_000;
 const LOGIN_TIMEOUT_MS = 10 * 60_000;
 

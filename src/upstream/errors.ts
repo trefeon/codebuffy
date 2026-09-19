@@ -90,5 +90,17 @@ export function classify(
 /** Alias kept for callers that prefer a verb-named import. */
 export const classifyError = classify;
 
+/**
+ * Secret-safe log fields for route catch blocks. UpstreamError carries the
+ * raw upstream body in .raw — pino serializes the whole error object, so
+ * logging { err } leaks response bodies (tokens, quota internals) into logs.
+ * Log code/message only; never the error object itself.
+ */
+export function upstreamLogFields(err: unknown): Record<string, unknown> {
+  if (err instanceof UpstreamError) return { code: err.code, message: err.message };
+  if (err instanceof Error) return { message: err.message };
+  return { message: String(err) };
+}
+
 /** Back-compat alias for older import name. */
 export const isRetryableCode = isRetryable;

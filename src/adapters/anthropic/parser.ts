@@ -35,13 +35,12 @@ function stringifyToolResultContent(content: AnthropicToolResultBlock["content"]
 
 /**
  * Convert an Anthropic image block source to the IR image unit (upstream-ready
- * data: URL). Only base64 sources exist in the Anthropic Messages API; anything
- * else is a 400 — fail closed rather than silently dropping user content.
+ * data: URL). Returns undefined for malformed sources so the caller skips the
+ * block — matching the openai-chat parser (malformed image blocks are skipped,
+ * never 400; the rest of the request still parses).
  */
-function anthropicImageToIR(source: unknown, idx: number): IRImage {
-  if (!source || typeof source !== "object") {
-    throw new ParseError(`messages.${idx}.content: image source must be {type:"base64", media_type, data}`);
-  }
+function anthropicImageToIR(source: unknown): IRImage | undefined {
+  if (!source || typeof source !== "object") return undefined;
   const rec = source as Record<string, unknown>;
   if (
     rec.type !== "base64" ||
@@ -49,7 +48,7 @@ function anthropicImageToIR(source: unknown, idx: number): IRImage {
     typeof rec.data !== "string" ||
     rec.data.length === 0
   ) {
-    throw new ParseError(`messages.${idx}.content: image source must be {type:"base64", media_type, data}`);
+    return undefined;
   }
   return { url: `data:${rec.media_type};base64,${rec.data}`, media_type: rec.media_type };
 }
@@ -135,7 +134,9 @@ export function parseAnthropicRequest(raw: unknown): IRRequest {
           } else if (block.type === "image") {
             // Forwarded as upstream image_url; silent by design — the parser
             // layer is logger-free, and IR.images evidences it per message.
-            images.push(anthropicImageToIR((b as AnthropicImageBlock).source, idx));
+            // Malformed sources are skipped (openai-chat parity), never 400.
+            const img = anthropicImageToIR((b as AnthropicImageBlock).source);
+            if (img) images.push(img);
           } else if (block.type === "thinking") {
             // Thinking is reasoning, not user text: preserve it in IR.thinking
             // instead of flattening it into content.
@@ -205,7 +206,9 @@ export function parseAnthropicRequest(raw: unknown): IRRequest {
             throw new ParseError(`messages.${idx}.content: tool_result not allowed in assistant role`);
           } else if (block.type === "image") {
             // Forwarded as upstream image_url; silent by design (see above).
-            images.push(anthropicImageToIR((b as AnthropicImageBlock).source, idx));
+            // Malformed sources are skipped (openai-chat parity), never 400.
+            const img = anthropicImageToIR((b as AnthropicImageBlock).source);
+            if (img) images.push(img);
           } else {
             throw new ParseError(`messages.${idx}.content: unknown block type ${(block as { type: string }).type}`);
           }

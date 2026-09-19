@@ -408,7 +408,7 @@ describe("RefreshService", () => {
     expect(h["x-user-id"]).toBe("uid-hdr");
     // also check fingerprint headers
     expect(h["x-client-platform"] ?? h["x-client-platform".toLowerCase()]).toBeDefined();
-    expect(h["user-agent"]).toBe("CLI/2.63.2 CodeBuddy/2.63.2");
+    expect(h["user-agent"]).toBe("CLI/2.108.1 CodeBuddy/2.108.1");
   });
 
   it("ensureFresh single-flight visible via Map - inflight property exists and dedup works under ensureFresh", async () => {

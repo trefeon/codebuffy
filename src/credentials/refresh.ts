@@ -3,7 +3,11 @@ import type { Logger } from "../logger";
 import type { Credential } from "./types";
 import { isExpiring } from "./types";
 import { UpstreamError, RETRYABLE_CODES } from "../upstream/errors";
-import { FINGERPRINT_UA } from "../upstream/headers";
+import {
+  UPSTREAM_CLIENT_VERSION_DEFAULT,
+  UPSTREAM_CLI_VERSION_DEFAULT,
+} from "../config";
+import type { UpstreamVersions } from "../upstream/headers";
 
 export interface RefreshStore {
   get(uid: string): Promise<Credential | null> | Credential | null;
@@ -139,7 +143,13 @@ function containsUid(payload: unknown, expectedUid: string, depth = 0): boolean 
   return found === expectedUid;
 }
 
-function buildRefreshHeaders(cred: Credential): Record<string, string> {
+function refreshUA(versions?: UpstreamVersions): string {
+  const cli = versions?.cliVersion ?? UPSTREAM_CLI_VERSION_DEFAULT;
+  const client = versions?.clientVersion ?? UPSTREAM_CLIENT_VERSION_DEFAULT;
+  return `CLI/${cli} CodeBuddy/${client}`;
+}
+
+function buildRefreshHeaders(cred: Credential, versions?: UpstreamVersions): Record<string, string> {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${cred.auth.accessToken}`,
     "X-Refresh-Token": cred.auth.refreshToken,
@@ -147,7 +157,7 @@ function buildRefreshHeaders(cred: Credential): Record<string, string> {
     "X-Product": "SaaS",
     "X-Domain": cred.domain,
     "x-client-platform": "web",
-    "User-Agent": FINGERPRINT_UA,
+    "User-Agent": refreshUA(versions),
   };
   if (cred.uid) headers["X-User-Id"] = cred.uid;
   if (cred.enterpriseId) headers["X-Enterprise-Id"] = cred.enterpriseId;
@@ -156,13 +166,19 @@ function buildRefreshHeaders(cred: Credential): Record<string, string> {
   return headers;
 }
 
-function buildValidationHeaders(uid: string, accessToken: string, domain: string, enterpriseId?: string): Record<string, string> {
+function buildValidationHeaders(
+  uid: string,
+  accessToken: string,
+  domain: string,
+  enterpriseId?: string,
+  versions?: UpstreamVersions,
+): Record<string, string> {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${accessToken}`,
     "X-Product": "SaaS",
     "X-Domain": domain,
     "x-client-platform": "web",
-    "User-Agent": FINGERPRINT_UA,
+    "User-Agent": refreshUA(versions),
     Accept: "application/json",
   };
   if (uid) headers["X-User-Id"] = uid;
@@ -237,7 +253,10 @@ export class RefreshService {
     expiresAt?: number;
     refreshExpiresAt?: number;
   }> {
-    const headers = buildRefreshHeaders(cred);
+    const headers = buildRefreshHeaders(cred, {
+      cliVersion: this.config.upstreamCliVersion,
+      clientVersion: this.config.upstreamClientVersion,
+    });
     const body = JSON.stringify({});
 
     const bases = Array.from(
@@ -322,7 +341,10 @@ export class RefreshService {
 
   private async validateBoundUid(newAccessToken: string, originalCred: Credential, expectedUid: string): Promise<void> {
     const url = `${this.config.consoleBase.replace(/\/$/, "")}/console/accounts`;
-    const headers = buildValidationHeaders(expectedUid, newAccessToken, originalCred.domain, originalCred.enterpriseId);
+    const headers = buildValidationHeaders(expectedUid, newAccessToken, originalCred.domain, originalCred.enterpriseId, {
+      cliVersion: this.config.upstreamCliVersion,
+      clientVersion: this.config.upstreamClientVersion,
+    });
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.config.upstreamTimeoutMs);

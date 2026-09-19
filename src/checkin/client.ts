@@ -32,7 +32,10 @@ export async function performCheckin(
   const base = config.apiBase.replace(/\/+$/, "");
   const url = `${base}/v2/billing/meter/daily-checkin`;
 
-  const headers = buildUpstreamHeaders(cred);
+  const headers = buildUpstreamHeaders(cred, {
+    cliVersion: config.upstreamCliVersion,
+    clientVersion: config.upstreamClientVersion,
+  });
   headers.Accept = "application/json";
   // No body required for daily check-in; ensure content-type not sent empty.
   // Some backends expect JSON; send minimal empty JSON if needed — we omit body.

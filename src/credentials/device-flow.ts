@@ -14,11 +14,7 @@
  */
 import type { Credential } from "./types";
 import { normalizePoolFile } from "./types";
-import {
-  INTL_PLATFORM_DEFAULT,
-  UPSTREAM_CLIENT_VERSION_DEFAULT,
-  UPSTREAM_CLI_VERSION_DEFAULT,
-} from "../config";
+import { INTL_PLATFORM_DEFAULT } from "../config";
 
 export type DeviceFlowDomain = "cn" | "intl";
 
@@ -27,11 +23,15 @@ const DOMAINS: Record<DeviceFlowDomain, { base: string; host: string }> = {
   intl: { base: "https://www.codebuddy.ai", host: "www.codebuddy.ai" },
 };
 
-/** Device UA follows config keys upstreamCliVersion / upstreamClientVersion. */
-const DEVICE_UA = `CLI/${UPSTREAM_CLI_VERSION_DEFAULT} CodeBuddy/${UPSTREAM_CLIENT_VERSION_DEFAULT}`;
+/**
+ * OAuth device-flow UA lineage (plugin-auth plane). Separate from the
+ * chat-wire FINGERPRINT_UA: the /v2/plugin/auth/* endpoints pin the older
+ * CLI 2.63.2 identity — do NOT reuse UPSTREAM_*_VERSION_DEFAULT here.
+ */
+export const DEVICE_OAUTH_UA = "CLI/2.63.2 CodeBuddy/2.63.2";
 /** OAuth platform is per-domain: CLI for CN, config intlPlatform (ide) for Intl. */
-function platformForDomain(domain: DeviceFlowDomain): string {
-  return domain === "intl" ? INTL_PLATFORM_DEFAULT : "CLI";
+function platformForDomain(domain: DeviceFlowDomain, intlPlatform: string = INTL_PLATFORM_DEFAULT): string {
+  return domain === "intl" ? intlPlatform : "CLI";
 }
 /** Upstream-recommended poll cadence surfaced to callers (seconds). */
 const INTERVAL_SEC = 5;
@@ -74,7 +74,7 @@ interface Envelope {
 function anonHeaders(host: string, extra: Record<string, string> = {}): Record<string, string> {
   return {
     Accept: "application/json",
-    "User-Agent": DEVICE_UA,
+    "User-Agent": DEVICE_OAUTH_UA,
     "X-Requested-With": "XMLHttpRequest",
     "X-Domain": host,
     "X-No-Authorization": "true",
@@ -89,11 +89,11 @@ function anonHeaders(host: string, extra: Record<string, string> = {}): Record<s
  */
 export async function startDeviceFlow(
   domain: DeviceFlowDomain,
-  opts: { fetchImpl?: typeof fetch } = {},
+  opts: { fetchImpl?: typeof fetch; intlPlatform?: string } = {},
 ): Promise<DeviceFlowStart> {
   const f = opts.fetchImpl ?? fetch;
   const { base, host } = DOMAINS[domain];
-  const res = await f(`${base}/v2/plugin/auth/state?platform=${platformForDomain(domain)}`, {
+  const res = await f(`${base}/v2/plugin/auth/state?platform=${platformForDomain(domain, opts.intlPlatform)}`, {
     method: "POST",
     headers: anonHeaders(host, { "Content-Type": "application/json", "X-Product": "SaaS" }),
     body: "{}",

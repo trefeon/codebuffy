@@ -184,6 +184,28 @@ export function parseIRRequest(raw: unknown): IRRequest {
  *   has no thinking channel. It is preserved in IR for Anthropic-faithful
  *   re-emission by the Anthropic emitter.
  */
+/**
+ * Extract plain text from message content. Normally a string, but the INTL
+ * shaper stores typed text blocks (array) in content — flatten those to text
+ * so the image path below never nests an array as a text value.
+ */
+function contentToText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    const texts: string[] = [];
+    for (const b of content) {
+      if (b && typeof b === "object" && (b as Record<string, unknown>).type === "text") {
+        const t = (b as Record<string, unknown>).text;
+        if (typeof t === "string") texts.push(t);
+      } else if (typeof b === "string") {
+        texts.push(b);
+      }
+    }
+    return texts.join("");
+  }
+  return "";
+}
+
 function toUpstreamMessage(m: IRMessage): Record<string, unknown> {
   const msg: Record<string, unknown> = { role: m.role, content: m.content };
   if (m.name !== undefined) msg.name = m.name;
@@ -192,7 +214,8 @@ function toUpstreamMessage(m: IRMessage): Record<string, unknown> {
   if (m.is_error === true) msg.is_error = true;
   if (m.images !== undefined && m.images.length > 0) {
     const parts: Array<Record<string, unknown>> = [];
-    if (m.content) parts.push({ type: "text", text: m.content });
+    const text = contentToText(m.content);
+    if (text) parts.push({ type: "text", text });
     for (const img of m.images) {
       const imageUrl: Record<string, unknown> = { url: img.url };
       if (img.detail !== undefined) imageUrl.detail = img.detail;

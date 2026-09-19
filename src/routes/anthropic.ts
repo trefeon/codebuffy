@@ -6,7 +6,8 @@ import type { Logger } from "../logger";
 import type { Pool } from "../pool/types";
 import type { UpstreamClient } from "../upstream/client";
 import type { Credential } from "../credentials/types";
-import { UpstreamError } from "../upstream/errors";
+import { UpstreamError, upstreamLogFields } from "../upstream/errors";
+import { AdmissionRejectedError } from "../pool/round-robin";
 import { parseAnthropicRequest } from "../adapters/anthropic/parser";
 import { ParseError } from "../ir/types";
 import { aggregateStream } from "../adapters/openai-chat/aggregator";
@@ -119,9 +120,29 @@ export function mountAnthropicRoutes(app: Hono, deps: AnthropicDeps): void {
       throw e;
     }
     const isStream = ir.stream === true;
-    ir = ensureLeadingSystem(ir);
+
+    // G6 admission gate (see openai.ts): saturated pool → 503 + Retry-After.
+    try {
+      await pool.acquireAdmission?.();
+    } catch (err) {
+      if (err instanceof AdmissionRejectedError) {
+        return c.json(
+          { type: "error", error: { type: "overloaded_error", message: err.message } },
+          503,
+          { "Retry-After": String(err.retryAfter) },
+        );
+      }
+      throw err;
+    }
+    let admitted = true;
+    const releaseAdmissionOnce = (): void => {
+      if (!admitted) return;
+      admitted = false;
+      pool.releaseAdmission?.();
+    };
     const cred = await pool.pick();
     if (!cred) {
+      releaseAdmissionOnce();
       return c.json(
         { type: "error", error: { type: "api_error", message: "No credentials available" } },
         503,
@@ -160,7 +181,7 @@ export function mountAnthropicRoutes(app: Hono, deps: AnthropicDeps): void {
       try {
         activeCred = await deps.refresh.refreshNow(activeCred.uid);
       } catch (refreshErr) {
-        logger.warn({ err: refreshErr, uid: activeCred.uid }, "live auth refresh failed; keeping original error");
+        logger.warn({ ...upstreamLogFields(refreshErr), uid: activeCred.uid }, "live auth refresh failed; keeping original error");
         return false;
       }
       chunks = upstream.streamChat(upstreamReq, activeCred, signal);
@@ -169,6 +190,7 @@ export function mountAnthropicRoutes(app: Hono, deps: AnthropicDeps): void {
 
     if (isStream) {
       return streamSSE(c, async (stream) => {
+        try {
         let lastId: string | undefined;
         let lastUsage: unknown;
         let emitted = false;
@@ -203,7 +225,7 @@ export function mountAnthropicRoutes(app: Hono, deps: AnthropicDeps): void {
               const mapped = mapUpstreamErrorToHttp(err);
               await stream.write(formatAnthropicSSE("error", mapped.body));
             } else {
-              logger.error({ err }, "stream messages failed");
+              logger.error(upstreamLogFields(err), "stream messages failed");
               await stream.write(
                 formatAnthropicSSE("error", {
                   type: "error",
@@ -214,8 +236,12 @@ export function mountAnthropicRoutes(app: Hono, deps: AnthropicDeps): void {
             break;
           }
         }
+        } finally {
+          releaseAdmissionOnce();
+        }
       });
     } else {
+      try {
       const id = generateId("msg");
       const created = Math.floor(Date.now() / 1000);
       for (;;) {
@@ -266,12 +292,15 @@ export function mountAnthropicRoutes(app: Hono, deps: AnthropicDeps): void {
             const mapped = mapUpstreamErrorToHttp(err);
             return c.json(mapped.body, mapped.status as never);
           }
-          logger.error({ err }, "messages failed");
+          logger.error(upstreamLogFields(err), "messages failed");
           return c.json(
             { type: "error", error: { type: "api_error", message: "upstream request failed" } },
             502,
           );
         }
+      }
+      } finally {
+        releaseAdmissionOnce();
       }
     }
   });
