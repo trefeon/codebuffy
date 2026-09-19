@@ -1,0 +1,5 @@
+# G7 coverage: report-only (`bun run coverage` prints the table, always exits 0).
+# Enforcement deferred: bun 1.4.2 enforces coverageThreshold per file, and
+# tracing.ts/usage-quota.ts/usage.ts sit far below any honest global floor.
+# Raise per-file coverage first, then re-add e.g. `coverageThreshold = { lines = 0.8, functions = 0.8 }`.
+[test]

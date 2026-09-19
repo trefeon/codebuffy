@@ -125,11 +125,20 @@ export class QuotaError extends Error {
 /** Fetch + classify the billing packages for one credential. */
 export async function fetchUsageQuota(
   credential: Credential,
-  opts: { apiBase: string; logger: { warn: (o: unknown, m: string) => void }; fetchImpl?: typeof fetch },
+  opts: {
+    apiBase: string;
+    logger: { warn: (o: unknown, m: string) => void };
+    fetchImpl?: typeof fetch;
+    cliVersion?: string;
+    clientVersion?: string;
+  },
 ): Promise<UsageQuota> {
   const f = opts.fetchImpl ?? fetch;
   const base = (credential.apiBase || opts.apiBase).replace(/\/+$/, "");
-  const headers = buildUpstreamHeaders(credential);
+  const headers = buildUpstreamHeaders(credential, {
+    cliVersion: opts.cliVersion,
+    clientVersion: opts.clientVersion,
+  });
   headers["Content-Type"] = "application/json";
   headers["Accept"] = "application/json";
   const res = await f(`${base}/v2/billing/meter/get-user-resource`, {

@@ -6,7 +6,8 @@ import type { Logger } from "../logger";
 import type { Pool } from "../pool/types";
 import type { UpstreamClient } from "../upstream/client";
 import type { Credential } from "../credentials/types";
-import { UpstreamError } from "../upstream/errors";
+import { UpstreamError, upstreamLogFields } from "../upstream/errors";
+import { AdmissionRejectedError } from "../pool/round-robin";
 import { parseAnthropicRequest } from "../adapters/anthropic/parser";
 import { ParseError } from "../ir/types";
 import { aggregateStream } from "../adapters/openai-chat/aggregator";
@@ -19,6 +20,7 @@ import {
 import { randomBytes } from "node:crypto";
 import { pushFromUpstreamChunk } from "../observability/usage";
 import { ensureLeadingSystem } from "../ir/ensure-leading-system";
+import { siteForBase } from "../models/catalog";
 
 function generateId(prefix = "msg"): string {
   const sep = prefix.endsWith("_") || prefix.endsWith("-") ? "" : "_";
@@ -118,15 +120,36 @@ export function mountAnthropicRoutes(app: Hono, deps: AnthropicDeps): void {
       throw e;
     }
     const isStream = ir.stream === true;
-    ir = ensureLeadingSystem(ir);
+
+    // G6 admission gate (see openai.ts): saturated pool → 503 + Retry-After.
+    try {
+      await pool.acquireAdmission?.();
+    } catch (err) {
+      if (err instanceof AdmissionRejectedError) {
+        return c.json(
+          { type: "error", error: { type: "overloaded_error", message: err.message } },
+          503,
+          { "Retry-After": String(err.retryAfter) },
+        );
+      }
+      throw err;
+    }
+    let admitted = true;
+    const releaseAdmissionOnce = (): void => {
+      if (!admitted) return;
+      admitted = false;
+      pool.releaseAdmission?.();
+    };
     const cred = await pool.pick();
     if (!cred) {
+      releaseAdmissionOnce();
       return c.json(
         { type: "error", error: { type: "api_error", message: "No credentials available" } },
         503,
       );
     }
 
+    ir = ensureLeadingSystem(ir, siteForBase(cred.apiBase)); // post-pick: CN no-op, intl contract
     const upstreamReq = toUpstreamRequest(ir);
 
     const signal: AbortSignal | undefined =
@@ -158,7 +181,7 @@ export function mountAnthropicRoutes(app: Hono, deps: AnthropicDeps): void {
       try {
         activeCred = await deps.refresh.refreshNow(activeCred.uid);
       } catch (refreshErr) {
-        logger.warn({ err: refreshErr, uid: activeCred.uid }, "live auth refresh failed; keeping original error");
+        logger.warn({ ...upstreamLogFields(refreshErr), uid: activeCred.uid }, "live auth refresh failed; keeping original error");
         return false;
       }
       chunks = upstream.streamChat(upstreamReq, activeCred, signal);
@@ -167,6 +190,7 @@ export function mountAnthropicRoutes(app: Hono, deps: AnthropicDeps): void {
 
     if (isStream) {
       return streamSSE(c, async (stream) => {
+        try {
         let lastId: string | undefined;
         let lastUsage: unknown;
         let emitted = false;
@@ -201,7 +225,7 @@ export function mountAnthropicRoutes(app: Hono, deps: AnthropicDeps): void {
               const mapped = mapUpstreamErrorToHttp(err);
               await stream.write(formatAnthropicSSE("error", mapped.body));
             } else {
-              logger.error({ err }, "stream messages failed");
+              logger.error(upstreamLogFields(err), "stream messages failed");
               await stream.write(
                 formatAnthropicSSE("error", {
                   type: "error",
@@ -212,8 +236,12 @@ export function mountAnthropicRoutes(app: Hono, deps: AnthropicDeps): void {
             break;
           }
         }
+        } finally {
+          releaseAdmissionOnce();
+        }
       });
     } else {
+      try {
       const id = generateId("msg");
       const created = Math.floor(Date.now() / 1000);
       for (;;) {
@@ -264,12 +292,15 @@ export function mountAnthropicRoutes(app: Hono, deps: AnthropicDeps): void {
             const mapped = mapUpstreamErrorToHttp(err);
             return c.json(mapped.body, mapped.status as never);
           }
-          logger.error({ err }, "messages failed");
+          logger.error(upstreamLogFields(err), "messages failed");
           return c.json(
             { type: "error", error: { type: "api_error", message: "upstream request failed" } },
             502,
           );
         }
+      }
+      } finally {
+        releaseAdmissionOnce();
       }
     }
   });
@@ -285,9 +316,25 @@ export function mountAnthropicRoutes(app: Hono, deps: AnthropicDeps): void {
       );
     }
 
+    // Local word-boundary estimate — NEVER an upstream call. Counting is a
+    // pure function of the request body: no credentials, no network, no
+    // side effects. `detail: "heuristic"` tells clients the number is a
+    // rough word-level estimate, not a tokenizer count.
+    const IMAGE_TOKEN_ALLOWANCE = 1000;
+    const estimateWordBoundaryTokens = (text: string): number => {
+      const trimmed = text.trim();
+      if (!trimmed) return 0;
+      // Words (letters/digits, incl. contractions) count 1; each CJK
+      // character, punctuation mark, or symbol counts 1. Approximates
+      // per-word billing granularity; BPE would split long words further.
+      const segments = trimmed.match(/[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)?|[^\s\p{L}\p{N}]/gu);
+      return segments === null ? 0 : segments.length;
+    };
+
     try {
       const r = raw as Record<string, unknown>;
       let text = "";
+      let imageBlocks = 0;
       const sys = r.system;
       if (typeof sys === "string") text += sys + " ";
       else if (Array.isArray(sys)) {
@@ -305,6 +352,10 @@ export function mountAnthropicRoutes(app: Hono, deps: AnthropicDeps): void {
               if (b?.type === "text" && typeof b.text === "string") text += b.text + " ";
               else if (b?.type === "thinking" && typeof (b as { thinking?: string }).thinking === "string") {
                 text += (b as { thinking: string }).thinking + " ";
+              } else if (b?.type === "image" || b?.type === "image_url") {
+                // Billed by size upstream; without image dimensions a flat
+                // documented allowance is the honest local approximation.
+                imageBlocks++;
               } else if (b?.type === "tool_result") {
                 const tr = b as { content?: unknown };
                 if (typeof tr.content === "string") text += tr.content + " ";
@@ -324,8 +375,8 @@ export function mountAnthropicRoutes(app: Hono, deps: AnthropicDeps): void {
           if (typeof t.description === "string") text += t.description + " ";
         }
       }
-      const tokens = text.trim() ? text.trim().split(/\s+/).length : 0;
-      return c.json({ input_tokens: tokens });
+      const tokens = estimateWordBoundaryTokens(text) + imageBlocks * IMAGE_TOKEN_ALLOWANCE;
+      return c.json({ input_tokens: tokens, detail: "heuristic" });
     } catch {
       return c.json(
         { type: "error", error: { type: "invalid_request_error", message: "count_tokens not implemented" } },

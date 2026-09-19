@@ -175,6 +175,8 @@ export function mountAdminRoutes(app: Hono, deps: MountAdminDeps): void {
       const quota = await fetchUsageQuota(cred, {
         apiBase: deps.config.apiBase,
         logger,
+        cliVersion: deps.config.upstreamCliVersion,
+        clientVersion: deps.config.upstreamClientVersion,
       });
       return c.json({ uid: cred.uid, ...quota });
     } catch (err) {
@@ -197,7 +199,10 @@ export function mountAdminRoutes(app: Hono, deps: MountAdminDeps): void {
       return c.json({ error: { code: "INVALID_DOMAIN", message: `domain must be "cn" or "intl"` } }, 400);
     }
     try {
-      const start = await startDeviceFlow(domain, { fetchImpl: deps.fetchImpl });
+      const start = await startDeviceFlow(domain, {
+        fetchImpl: deps.fetchImpl,
+        intlPlatform: deps.config.intlPlatform,
+      });
       logger.info({ domain }, "device-flow login started");
       return c.json({ ok: true, ...start });
     } catch (err) {

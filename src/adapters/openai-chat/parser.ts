@@ -1,4 +1,4 @@
-import { parseIRRequest, ParseError, type IRRequest } from "../../ir/types";
+import { parseIRRequest, ParseError, type IRRequest, type IRImage } from "../../ir/types";
 
 export type { IRRequest };
 export { ParseError };
@@ -12,6 +12,27 @@ const ALLOWED_ROLES: Record<string, true> = {
 };
 
 /**
+ * Normalize an OpenAI `image_url` block value to the IR image unit.
+ * Accepts the spec object form `{url, detail?}` and a bare URL string;
+ * returns undefined for malformed values so the caller skips (never 400s).
+ */
+function openAIImageToIR(imageUrl: unknown): IRImage | undefined {
+  if (typeof imageUrl === "string") {
+    return imageUrl.length > 0 ? { url: imageUrl } : undefined;
+  }
+  if (imageUrl && typeof imageUrl === "object") {
+    if ("url" in imageUrl) {
+      const url = imageUrl.url;
+      if (typeof url !== "string" || url.length === 0) return undefined;
+      const img: IRImage = { url };
+      if ("detail" in imageUrl && typeof imageUrl.detail === "string") img.detail = imageUrl.detail;
+      return img;
+    }
+  }
+  return undefined;
+}
+
+/**
  * Parse an OpenAI Chat Completions request body into the canonical IR.
  *
  * Pre-validates the OpenAI-specific envelope (model, messages, roles) to
@@ -21,7 +42,9 @@ const ALLOWED_ROLES: Record<string, true> = {
  * - `model` must be a non-empty string
  * - `messages` must be a non-empty array
  * - each message must have a role in {system,user,assistant,tool,function}
- *   and a string `content` (tool_calls allowed for assistant)
+ *   and a string `content` (tool_calls allowed for assistant); array content
+ *   is normalized by joining text blocks and forwarding `image_url` blocks
+ *   into IR `images` (malformed image blocks are skipped, never 400)
  * - role "function" is normalized to "tool" for IR compatibility
  *
  * Throws ParseError with status 400 on any validation failure.
@@ -59,26 +82,31 @@ export function parseOpenAIChatRequest(raw: unknown): IRRequest {
     }
 
     // OpenAI allows content as string or array of blocks (vision etc.)
-    // IR keeps content as string, so normalize arrays by joining text blocks.
-    // Image content is not rejected; text parts are extracted and joined.
+    // IR keeps text in `content` and vision in `images`, so normalize arrays
+    // by joining text blocks and forwarding image_url blocks. Malformed
+    // image blocks are skipped, never 400 — vision must not fail the request.
     let normalizedContent: unknown = msg.content;
+    let images: IRImage[] | undefined;
     if (Array.isArray(msg.content)) {
       const blocks = msg.content as unknown[];
       const texts: string[] = [];
+      const found: IRImage[] = [];
       for (const b of blocks) {
         if (b && typeof b === "object" && "type" in (b as Record<string, unknown>)) {
           const block = b as Record<string, unknown>;
           if (block.type === "text" && typeof block.text === "string") texts.push(block.text);
           else if (block.type === "image_url") {
-            // Vision blocks have no text; keep content non-empty so IR validation passes.
-            // Future IR will carry image_url separately; for M2 join as placeholder.
-            // Intentionally not throwing — clients should not get 400 for vision.
+            // Forwarded as upstream image_url; silent by design — the parser
+            // layer is logger-free, and IR.images evidences it per message.
+            const img = openAIImageToIR(block.image_url);
+            if (img !== undefined) found.push(img);
           }
         } else if (typeof b === "string") {
           texts.push(b);
         }
       }
       normalizedContent = texts.join("");
+      if (found.length > 0) images = found;
     }
 
     if (typeof normalizedContent !== "string") {
@@ -91,11 +119,16 @@ export function parseOpenAIChatRequest(raw: unknown): IRRequest {
 
     // Legacy "function" role -> "tool" for IR
     if (role === "function") {
-      return { ...msg, role: "tool", content: normalizedContent };
+      const out: Record<string, unknown> = { ...msg, role: "tool", content: normalizedContent };
+      if (images !== undefined) out.images = images;
+      return out;
     }
 
-    return { ...msg, content: normalizedContent };
+    const out: Record<string, unknown> = { ...msg, content: normalizedContent };
+    if (images !== undefined) out.images = images;
+    return out;
   });
+
 
   const normalized: Record<string, unknown> = {
     ...body,

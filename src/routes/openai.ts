@@ -5,7 +5,8 @@ import type { Logger } from "../logger";
 import type { Pool } from "../pool/types";
 import type { UpstreamClient } from "../upstream/client";
 import type { Credential } from "../credentials/types";
-import { UpstreamError } from "../upstream/errors";
+import { UpstreamError, upstreamLogFields } from "../upstream/errors";
+import { AdmissionRejectedError } from "../pool/round-robin";
 import { parseOpenAIChatRequest, ParseError } from "../adapters/openai-chat/parser";
 import { aggregateStream } from "../adapters/openai-chat/aggregator";
 import { toUpstreamRequest } from "../ir/types";
@@ -105,13 +106,35 @@ export function mountOpenAIRoutes(app: Hono, deps: OpenAIDeps): void {
       throw e;
     }
     const isStream = ir.stream === true;
-    ir = ensureLeadingSystem(ir);
+
+    // G6 admission gate: bound concurrent upstream work. A saturated pool
+    // fails here with 503 + Retry-After before any credential is touched.
+    try {
+      await pool.acquireAdmission?.();
+    } catch (err) {
+      if (err instanceof AdmissionRejectedError) {
+        return c.json(
+          { error: { message: err.message, type: "server_error", param: null, code: err.code } },
+          503,
+          { "Retry-After": String(err.retryAfter) },
+        );
+      }
+      throw err;
+    }
+    let admitted = true;
+    const releaseAdmissionOnce = (): void => {
+      if (!admitted) return;
+      admitted = false;
+      pool.releaseAdmission?.();
+    };
 
     const cred = await pool.pick();
     if (!cred) {
+      releaseAdmissionOnce();
       return c.json({ error: { message: "No credentials available", type: "server_error", param: null, code: "no_credentials" } }, 503);
     }
 
+    ir = ensureLeadingSystem(ir, siteForBase(cred.apiBase)); // post-pick: CN no-op, intl contract
     const upstreamReq = toUpstreamRequest(ir);
 
     const signal: AbortSignal | undefined =
@@ -133,7 +156,7 @@ export function mountOpenAIRoutes(app: Hono, deps: OpenAIDeps): void {
       try {
         activeCred = await deps.refresh.refreshNow(activeCred.uid);
       } catch (refreshErr) {
-        logger.warn({ err: refreshErr, uid: activeCred.uid }, "live auth refresh failed; keeping original error");
+        logger.warn({ ...upstreamLogFields(refreshErr), uid: activeCred.uid }, "live auth refresh failed; keeping original error");
         return false;
       }
       chunks = upstream.streamChat(upstreamReq, activeCred, signal);
@@ -143,6 +166,7 @@ export function mountOpenAIRoutes(app: Hono, deps: OpenAIDeps): void {
     try {
       if (isStream) {
         return streamSSE(c, async (stream) => {
+          try {
           let lastId: string | undefined;
           let lastUsage: unknown;
           let emitted = false;
@@ -163,7 +187,7 @@ export function mountOpenAIRoutes(app: Hono, deps: OpenAIDeps): void {
                 const mapped = mapUpstreamErrorToHttp(err);
                 await stream.writeSSE({ event: "error", data: JSON.stringify(mapped.body) });
               } else {
-                logger.error({ err }, "stream chat failed");
+                logger.error(upstreamLogFields(err), "stream chat failed");
                 await stream.writeSSE({ event: "error", data: JSON.stringify({ error: { message: "upstream stream failed", type: "api_error" } }) });
               }
               break;
@@ -178,8 +202,12 @@ export function mountOpenAIRoutes(app: Hono, deps: OpenAIDeps): void {
             }
           }
           await stream.writeSSE({ data: "[DONE]" });
+          } finally {
+            releaseAdmissionOnce();
+          }
         });
       } else {
+        try {
         const id = generateId("chatcmpl");
         const created = Math.floor(Date.now() / 1000);
         for (;;) {
@@ -212,13 +240,16 @@ export function mountOpenAIRoutes(app: Hono, deps: OpenAIDeps): void {
             throw err;
           }
         }
+        } finally {
+          releaseAdmissionOnce();
+        }
       }
     } catch (err) {
       if (err instanceof UpstreamError) {
         const mapped = mapUpstreamErrorToHttp(err);
         return c.json(mapped.body, mapped.status as 400 | 401 | 403 | 429 | 500 | 502 | 503);
       }
-      logger.error({ err }, "chat completions failed");
+      logger.error(upstreamLogFields(err), "chat completions failed");
       return c.json({ error: { message: "upstream request failed", type: "api_error", param: null, code: "upstream_error" } }, 502);
     }
   });
@@ -257,14 +288,14 @@ export function mountOpenAIRoutes(app: Hono, deps: OpenAIDeps): void {
     } catch (err) {
       if (err instanceof UpstreamError) {
         // Upstream unavailable — serve generated catalog for this site instead of failing.
-        logger.warn({ err, site }, "models fetch failed; serving generated catalog");
+        logger.warn({ ...upstreamLogFields(err), site }, "models fetch failed; serving generated catalog");
         const now = Math.floor(Date.now() / 1000);
         const data = catalogForSite(site).map((m) =>
           enrich({ id: m.id, object: "model" as const, created: now, owned_by: "tencent" }, site),
         );
         return c.json({ object: "list", data });
       }
-      logger.error({ err }, "models fetch failed");
+      logger.error(upstreamLogFields(err), "models fetch failed");
       return c.json({ error: { message: "failed to fetch models", type: "api_error", param: null, code: "upstream_error" } }, 502);
     }
   });

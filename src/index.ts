@@ -1,4 +1,4 @@
-import { createApp } from "./app";
+import { assertProviderRegistry, createApp } from "./app";
 import { loadConfig } from "./config";
 import { createLogger } from "./logger";
 import { registerShutdown } from "./shutdown";
@@ -34,6 +34,17 @@ if (config.encryptionKey) {
 // Credential store (WAL, encrypted_data migration)
 const store = new SqliteCredentialStore(config.dbPath, encryptionKey);
 logger.info({ encrypted: store.isEncrypted() }, "credential store ready");
+
+// G3 fail-closed: encrypted rows without a key must never silently fall back
+// to unreadable-nulls. Plaintext legacy rows (data column only) still migrate.
+if (!encryptionKey && store.hasEncryptedRows()) {
+  logger.error(
+    "credential store holds encrypted rows but CODEBUFFY_ENCRYPTION_KEY is not configured — refusing to start",
+  );
+  throw new Error(
+    "credential store holds encrypted rows but CODEBUFFY_ENCRYPTION_KEY is not configured",
+  );
+}
 
 // Best-effort import of pool files produced by scripts/onboard-account.mjs.
 // Awaited before pool construction so startup log reflects actual size.
@@ -90,6 +101,9 @@ if (config.checkinEnabled) {
 if (!isLoopback(config.host)) {
   logger.warn({ host: config.host }, "CODEBUFFY_HOST is not loopback — /admin/* will be reachable off-host");
 }
+
+// G10: every mounted dialect must have an executor before serving.
+assertProviderRegistry({ config, logger, startedAt: Date.now(), pool, upstream });
 
 const app = createApp({
   config,

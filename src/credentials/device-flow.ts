@@ -3,16 +3,18 @@
  *
  * Wire semantics ported 1:1 from
  * reference/decolua__9router/src/lib/oauth/providers/codebuddy-cn.js:
- *   1. POST /v2/plugin/auth/state?platform=CLI  -> { state, authUrl }
+ *   1. POST /v2/plugin/auth/state?platform=<CLI|ide>  -> { state, authUrl }
  *   2. Human opens authUrl in a browser and approves
  *   3. GET  /v2/plugin/auth/token?state=<state> until code 0;
  *      business code 11217 means "authorization pending".
  *
- * Both domains use the CLI platform fingerprint (UA + platform=CLI) per the
- * CN reference provider; only the base URL / X-Domain differ for Intl.
+ * CN uses the CLI platform fingerprint; Intl uses platform=ide per the intl
+ * reference registry (oauth.platform), with the same CLI UA on both.
+ * Only the base URL / X-Domain differ.
  */
 import type { Credential } from "./types";
 import { normalizePoolFile } from "./types";
+import { INTL_PLATFORM_DEFAULT } from "../config";
 
 export type DeviceFlowDomain = "cn" | "intl";
 
@@ -21,8 +23,16 @@ const DOMAINS: Record<DeviceFlowDomain, { base: string; host: string }> = {
   intl: { base: "https://www.codebuddy.ai", host: "www.codebuddy.ai" },
 };
 
-const DEVICE_UA = "CLI/2.63.2 CodeBuddy/2.63.2";
-const PLATFORM = "CLI";
+/**
+ * OAuth device-flow UA lineage (plugin-auth plane). Separate from the
+ * chat-wire FINGERPRINT_UA: the /v2/plugin/auth/* endpoints pin the older
+ * CLI 2.63.2 identity — do NOT reuse UPSTREAM_*_VERSION_DEFAULT here.
+ */
+export const DEVICE_OAUTH_UA = "CLI/2.63.2 CodeBuddy/2.63.2";
+/** OAuth platform is per-domain: CLI for CN, config intlPlatform (ide) for Intl. */
+function platformForDomain(domain: DeviceFlowDomain, intlPlatform: string = INTL_PLATFORM_DEFAULT): string {
+  return domain === "intl" ? intlPlatform : "CLI";
+}
 /** Upstream-recommended poll cadence surfaced to callers (seconds). */
 const INTERVAL_SEC = 5;
 /** Business code returned while the user has not finished browser auth. */
@@ -64,7 +74,7 @@ interface Envelope {
 function anonHeaders(host: string, extra: Record<string, string> = {}): Record<string, string> {
   return {
     Accept: "application/json",
-    "User-Agent": DEVICE_UA,
+    "User-Agent": DEVICE_OAUTH_UA,
     "X-Requested-With": "XMLHttpRequest",
     "X-Domain": host,
     "X-No-Authorization": "true",
@@ -79,11 +89,11 @@ function anonHeaders(host: string, extra: Record<string, string> = {}): Record<s
  */
 export async function startDeviceFlow(
   domain: DeviceFlowDomain,
-  opts: { fetchImpl?: typeof fetch } = {},
+  opts: { fetchImpl?: typeof fetch; intlPlatform?: string } = {},
 ): Promise<DeviceFlowStart> {
   const f = opts.fetchImpl ?? fetch;
   const { base, host } = DOMAINS[domain];
-  const res = await f(`${base}/v2/plugin/auth/state?platform=${PLATFORM}`, {
+  const res = await f(`${base}/v2/plugin/auth/state?platform=${platformForDomain(domain, opts.intlPlatform)}`, {
     method: "POST",
     headers: anonHeaders(host, { "Content-Type": "application/json", "X-Product": "SaaS" }),
     body: "{}",

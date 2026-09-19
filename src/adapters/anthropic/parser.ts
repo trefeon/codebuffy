@@ -1,4 +1,4 @@
-import { parseIRRequest, ParseError, type IRRequest, type IRMessage } from "../../ir/types";
+import { parseIRRequest, ParseError, type IRRequest, type IRMessage, type IRImage } from "../../ir/types";
 
 // Anthropic content blocks (subset we support; thinking handled gracefully)
 type AnthropicTextBlock = { type: "text"; text: string };
@@ -32,6 +32,27 @@ function stringifyToolResultContent(content: AnthropicToolResultBlock["content"]
   if (Array.isArray(content)) return joinTextBlocks(content);
   return String(content ?? "");
 }
+
+/**
+ * Convert an Anthropic image block source to the IR image unit (upstream-ready
+ * data: URL). Returns undefined for malformed sources so the caller skips the
+ * block — matching the openai-chat parser (malformed image blocks are skipped,
+ * never 400; the rest of the request still parses).
+ */
+function anthropicImageToIR(source: unknown): IRImage | undefined {
+  if (!source || typeof source !== "object") return undefined;
+  const rec = source as Record<string, unknown>;
+  if (
+    rec.type !== "base64" ||
+    typeof rec.media_type !== "string" ||
+    typeof rec.data !== "string" ||
+    rec.data.length === 0
+  ) {
+    return undefined;
+  }
+  return { url: `data:${rec.media_type};base64,${rec.data}`, media_type: rec.media_type };
+}
+
 
 /**
  * Parse Anthropic Messages request into canonical IR.
@@ -99,6 +120,8 @@ export function parseAnthropicRequest(raw: unknown): IRRequest {
         irMessages.push({ role: "user", content: rawContent });
       } else if (Array.isArray(rawContent)) {
         const textParts: string[] = [];
+        const thinkingParts: string[] = [];
+        const images: IRImage[] = [];
         const toolResults: AnthropicToolResultBlock[] = [];
         for (const b of rawContent as AnthropicContentBlock[]) {
           if (!b || typeof b !== "object" || !("type" in (b as Record<string, unknown>))) {
@@ -109,12 +132,20 @@ export function parseAnthropicRequest(raw: unknown): IRRequest {
           else if (block.type === "tool_result") {
             toolResults.push(b as AnthropicToolResultBlock);
           } else if (block.type === "image") {
-            // Vision: not supported in IR string, drop with no error (future IR will carry image_url)
-            continue;
-          } else if (block.type === "thinking" || block.type === "redacted_thinking") {
-            // Thinking in user role is unexpected but don't 400 — treat thinking text as text if present
+            // Forwarded as upstream image_url; silent by design — the parser
+            // layer is logger-free, and IR.images evidences it per message.
+            // Malformed sources are skipped (openai-chat parity), never 400.
+            const img = anthropicImageToIR((b as AnthropicImageBlock).source);
+            if (img) images.push(img);
+          } else if (block.type === "thinking") {
+            // Thinking is reasoning, not user text: preserve it in IR.thinking
+            // instead of flattening it into content.
             const t = (block as AnthropicThinkingBlock & { thinking?: string }).thinking;
-            if (typeof t === "string") textParts.push(t);
+            if (typeof t === "string") thinkingParts.push(t);
+            continue;
+          } else if (block.type === "redacted_thinking") {
+            // Dropped, not forwarded: the payload is provider-encrypted and
+            // opaque to the gateway, so no upstream can consume it.
             continue;
           } else if (block.type === "tool_use") {
             throw new ParseError(`messages.${idx}.content: tool_use not allowed in user role`);
@@ -123,19 +154,21 @@ export function parseAnthropicRequest(raw: unknown): IRRequest {
           }
         }
         const userText = textParts.join("");
+        const thinking = thinkingParts.length > 0 ? thinkingParts.join("") : undefined;
         // Preserve order: text user message first (if any), then tool messages.
-        // If array was empty or contained only dropped images/redacted thinking, emit empty user message
-        // to preserve the turn (IR requires at least content string).
-        if (userText) {
-          irMessages.push({ role: "user", content: userText });
-        } else if (toolResults.length === 0) {
-          irMessages.push({ role: "user", content: "" });
+        // If the array carried only images/thinking (or was empty), still emit
+        // the user turn so the images/thinking have a carrier message.
+        if (userText || images.length > 0 || thinking !== undefined || toolResults.length === 0) {
+          const userMsg: IRMessage = { role: "user", content: userText };
+          if (images.length > 0) userMsg.images = images;
+          if (thinking !== undefined) userMsg.thinking = thinking;
+          irMessages.push(userMsg);
         }
         for (const tr of toolResults) {
           const content = stringifyToolResultContent(tr.content);
-          // TODO: IR has no is_error flag — preserve content as-is for now; don't drop error signal
-          const finalContent = tr.is_error ? content : content;
-          irMessages.push({ role: "tool", content: finalContent, tool_call_id: tr.tool_use_id });
+          const toolMsg: IRMessage = { role: "tool", content, tool_call_id: tr.tool_use_id };
+          if (tr.is_error === true) toolMsg.is_error = true;
+          irMessages.push(toolMsg);
         }
       } else {
         throw new ParseError(`messages.${idx}.content: must be string or array`);
@@ -146,6 +179,8 @@ export function parseAnthropicRequest(raw: unknown): IRRequest {
         irMessages.push({ role: "assistant", content: rawContent });
       } else if (Array.isArray(rawContent)) {
         const textParts: string[] = [];
+        const thinkingParts: string[] = [];
+        const images: IRImage[] = [];
         const toolCalls: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }> = [];
         for (const b of rawContent as AnthropicContentBlock[]) {
           if (!b || typeof b !== "object" || !("type" in (b as Record<string, unknown>))) {
@@ -159,21 +194,29 @@ export function parseAnthropicRequest(raw: unknown): IRRequest {
               throw new ParseError(`messages.${idx}.content: tool_use requires id and name`);
             }
             toolCalls.push({ id: tu.id, type: "function", function: { name: tu.name, arguments: JSON.stringify(tu.input ?? {}) } });
-          } else if (block.type === "thinking" && typeof (block as { thinking?: string }).thinking === "string") {
-            textParts.push((block as { thinking: string }).thinking);
+          } else if (block.type === "thinking") {
+            // Preserved in IR.thinking, not flattened into the reply text.
+            const t = (block as AnthropicThinkingBlock & { thinking?: string }).thinking;
+            if (typeof t === "string") thinkingParts.push(t);
           } else if (block.type === "redacted_thinking") {
-            // Drop but don't error — future IR may preserve
+            // Dropped, not forwarded: the payload is provider-encrypted and
+            // opaque to the gateway, so no upstream can consume it.
             continue;
           } else if (block.type === "tool_result") {
             throw new ParseError(`messages.${idx}.content: tool_result not allowed in assistant role`);
           } else if (block.type === "image") {
-            continue;
+            // Forwarded as upstream image_url; silent by design (see above).
+            // Malformed sources are skipped (openai-chat parity), never 400.
+            const img = anthropicImageToIR((b as AnthropicImageBlock).source);
+            if (img) images.push(img);
           } else {
             throw new ParseError(`messages.${idx}.content: unknown block type ${(block as { type: string }).type}`);
           }
         }
         const msg: IRMessage = { role: "assistant", content: textParts.join("") };
         if (toolCalls.length > 0) msg.tool_calls = toolCalls;
+        if (images.length > 0) msg.images = images;
+        if (thinkingParts.length > 0) msg.thinking = thinkingParts.join("");
         irMessages.push(msg);
       } else {
         throw new ParseError(`messages.${idx}.content: must be string or array`);
