@@ -1,0 +1,7 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Synthetic SECRET-BODY canary in secret-safe-logs test is fake by construction"
+paths = ['''test/secret-safe-logs.test.ts''']
+regexes = ['''SECRET-BODY-[A-Z0-9-]+''']
