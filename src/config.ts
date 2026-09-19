@@ -13,6 +13,10 @@ function boolFromEnv(val: unknown): unknown {
   return val;
 }
 
+/** Upstream fingerprint versions — single source of truth for UA builders. */
+export const UPSTREAM_CLI_VERSION_DEFAULT = "2.63.2";
+export const UPSTREAM_CLIENT_VERSION_DEFAULT = "2.63.2";
+export const INTL_PLATFORM_DEFAULT = "ide";
 const ConfigSchema = z.object({
   port: z.coerce.number().int().min(1).max(65535).default(3000),
   host: z.string().default("127.0.0.1"),
@@ -63,6 +67,10 @@ const ConfigSchema = z.object({
   checkinJitterMs: z.coerce.number().int().min(0).max(12 * 3600_000).default(3600000),
   // Encryption at rest
   encryptionKey: z.string().optional(),
+  // Upstream fingerprint versions (UA segments + intl OAuth platform; env-overridable)
+  upstreamCliVersion: z.string().min(1).default(UPSTREAM_CLI_VERSION_DEFAULT),
+  upstreamClientVersion: z.string().min(1).default(UPSTREAM_CLIENT_VERSION_DEFAULT),
+  intlPlatform: z.string().min(1).default(INTL_PLATFORM_DEFAULT),
 });
 export type Config = z.infer<typeof ConfigSchema>;
 export type LogLevel = (typeof LOG_LEVELS)[number];
@@ -87,6 +95,9 @@ const ENV_MAP: Record<keyof Config, string> = {
   checkinEnabled: "CODEBUFFY_CHECKIN_ENABLED",
   checkinJitterMs: "CODEBUFFY_CHECKIN_JITTER_MS",
   encryptionKey: "CODEBUFFY_ENCRYPTION_KEY",
+  upstreamCliVersion: "CODEBUFFY_UPSTREAM_CLI_VERSION",
+  upstreamClientVersion: "CODEBUFFY_UPSTREAM_CLIENT_VERSION",
+  intlPlatform: "CODEBUFFY_INTL_PLATFORM",
 };
 
 export type ConfigEnv = Record<string, string | undefined>;
