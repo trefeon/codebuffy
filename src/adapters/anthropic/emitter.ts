@@ -14,10 +14,25 @@ export function mapFinishReason(openai: string | null | undefined): string {
  * {content, tool_calls?, finish_reason, usage?}
  */
 export function buildAnthropicResponse(
-  aggregated: { content: string; tool_calls?: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }>; finish_reason: string | null; usage?: unknown },
+  aggregated: {
+    content: string;
+    tool_calls?: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }>;
+    finish_reason: string | null;
+    usage?: unknown;
+    /**
+     * Preserved reasoning to re-emit as a leading thinking block. The block
+     * carries no `signature` (gateway-originated, display-only); clients must
+     * not replay it verbatim into a provider that requires signed thinking.
+     */
+    thinking?: string;
+  },
   opts: { id: string; model: string },
 ): Record<string, unknown> {
   const content: Array<Record<string, unknown>> = [];
+
+  if (aggregated.thinking) {
+    content.push({ type: "thinking", thinking: aggregated.thinking });
+  }
 
   if (aggregated.content) {
     content.push({ type: "text", text: aggregated.content });
@@ -74,15 +89,37 @@ export async function* anthropicSSEFromUpstream(
 ): AsyncIterable<string> {
   let messageStarted = false;
   let textBlockStarted = false;
+  let textAnthropicIndex = 0;
+  let thinkingStarted = false;
+  let thinkingAnthropicIndex = 0;
   const toolIndexMap = new Map<number, number>();
   const toolBlocksStarted = new Set<number>();
   const toolState = new Map<number, { id: string; name: string }>();
   const openBlocks: number[] = [];
-  let nextToolAnthropicIndex = 1;
+  const usedAnthropicIndexes = new Set<number>();
+  let nextFreshAnthropicIndex = 1;
   let syntheticCounter = 100000;
   let finishReason: string | null | undefined = undefined;
   let finalUsage: unknown = undefined;
   let closed = false;
+
+  /**
+   * Allocate a content-block index. The preferred index is taken when still
+   * free (keeps the no-reasoning wire shape byte-identical: text 0, tools
+   * 1..); otherwise the next free index is used. Thinking takes 0 when it
+   * leads, pushing text to 1 and tools up accordingly.
+   */
+  function allocAnthropicIndex(preferred?: number): number {
+    if (preferred !== undefined && !usedAnthropicIndexes.has(preferred)) {
+      usedAnthropicIndexes.add(preferred);
+      if (preferred >= nextFreshAnthropicIndex) nextFreshAnthropicIndex = preferred + 1;
+      return preferred;
+    }
+    while (usedAnthropicIndexes.has(nextFreshAnthropicIndex)) nextFreshAnthropicIndex++;
+    const idx = nextFreshAnthropicIndex++;
+    usedAnthropicIndexes.add(idx);
+    return idx;
+  }
 
   function extractOutputTokens(u: unknown): number {
     if (!u || typeof u !== "object") return 0;
@@ -166,22 +203,56 @@ export async function* anthropicSSEFromUpstream(
       const delta = deltaRaw && typeof deltaRaw === "object" ? (deltaRaw as Record<string, unknown>) : undefined;
 
       if (delta) {
+        // Reasoning models stream their chain-of-thought outside `content`
+        // (DeepSeek-style `reasoning_content`, also accepted as `reasoning`).
+        // Previously dropped; now re-emitted as an Anthropic thinking block so
+        // the reasoning survives the conversion instead of vanishing.
+        const deltaRec = delta as Record<string, unknown>;
+        const reasoningVal =
+          typeof deltaRec.reasoning_content === "string"
+            ? deltaRec.reasoning_content
+            : typeof deltaRec.reasoning === "string"
+              ? deltaRec.reasoning
+              : undefined;
+        if (typeof reasoningVal === "string" && reasoningVal.length > 0) {
+          const start = ensureMessageStart();
+          if (start) yield start;
+          if (!thinkingStarted) {
+            thinkingStarted = true;
+            thinkingAnthropicIndex = allocAnthropicIndex(textBlockStarted ? undefined : 0);
+            openBlocks.push(thinkingAnthropicIndex);
+            yield formatAnthropicSSE("content_block_start", {
+              type: "content_block_start",
+              index: thinkingAnthropicIndex,
+              content_block: { type: "thinking", thinking: "" },
+            });
+          }
+          yield formatAnthropicSSE("content_block_delta", {
+            type: "content_block_delta",
+            index: thinkingAnthropicIndex,
+            delta: { type: "thinking_delta", thinking: reasoningVal },
+          });
+        }
+
         const contentVal = delta.content;
         if (typeof contentVal === "string" && contentVal.length > 0) {
           const start = ensureMessageStart();
           if (start) yield start;
           if (!textBlockStarted) {
             textBlockStarted = true;
-            openBlocks.push(0);
+            textAnthropicIndex = allocAnthropicIndex(
+              thinkingStarted && thinkingAnthropicIndex === 0 ? 1 : 0,
+            );
+            openBlocks.push(textAnthropicIndex);
             yield formatAnthropicSSE("content_block_start", {
               type: "content_block_start",
-              index: 0,
+              index: textAnthropicIndex,
               content_block: { type: "text", text: "" },
             });
           }
           yield formatAnthropicSSE("content_block_delta", {
             type: "content_block_delta",
-            index: 0,
+            index: textAnthropicIndex,
             delta: { type: "text_delta", text: contentVal },
           });
         }
@@ -201,7 +272,7 @@ export async function* anthropicSSEFromUpstream(
 
             let anthropicIdx = toolIndexMap.get(upstreamIdx);
             if (anthropicIdx === undefined) {
-              anthropicIdx = nextToolAnthropicIndex++;
+              anthropicIdx = allocAnthropicIndex();
               toolIndexMap.set(upstreamIdx, anthropicIdx);
             }
 
