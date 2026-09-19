@@ -23,7 +23,7 @@ const fakeCred: Credential = {
     capturedAt: Date.now(),
     source: "test",
   },
-  apiKey: { name: "test", fullKey: "ck_test_12345678" },
+  apiKey: { name: "test", fullKey: "ck_notarealkey0000" },
 };
 
 function makeMockPool(cred: Credential | null = fakeCred): Pool {
