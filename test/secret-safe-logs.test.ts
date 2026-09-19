@@ -8,7 +8,7 @@ import { UpstreamClient } from "../src/upstream/client";
 import type { UpstreamChunk } from "../src/upstream/types";
 import { UpstreamError } from "../src/upstream/errors";
 
-const SECRET = "SECRET-BODY-9f8e7d6c5b4a";
+const SECRET = "SECRET-BODY-CANARY-NOT-A-REAL-KEY";
 
 function makeCred(): Credential {
   const now = Date.now();
