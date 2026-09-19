@@ -14,6 +14,7 @@ import { mountAdminRoutes, type CheckinSchedulerLike } from "./admin/routes";
 import { mountOpenAIRoutes } from "./routes/openai";
 import { mountAnthropicRoutes } from "./routes/anthropic";
 import { mountResponsesRoutes } from "./routes/responses";
+import { mountCodexRoutes } from "./routes/codex";
 
 const VERSION = "0.1.0";
 
@@ -217,6 +218,14 @@ export function createApp(deps: AppDeps): Hono {
       refresh: deps.refresh,
     });
     mountResponsesRoutes(app, {
+      config: deps.config,
+      logger: deps.logger,
+      pool: deps.pool,
+      upstream: deps.upstream,
+      refresh: deps.refresh,
+    });
+    app.use("/codex/*", downstreamAuth(deps.config));
+    mountCodexRoutes(app, {
       config: deps.config,
       logger: deps.logger,
       pool: deps.pool,
